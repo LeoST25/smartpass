@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+.env
+infra/otp-data/*.pbf
+infra/otp-data/*.zip
+infra/otp-data/graphs/
