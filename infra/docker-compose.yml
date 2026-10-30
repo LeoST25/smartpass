@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   db:
     image: postgis/postgis:15-3.3
@@ -11,6 +13,17 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+
+  otp:
+    image: docker.io/opentripplanner/opentripplanner:latest
+    container_name: smartpass_otp
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./otp-data:/var/otp
+    command: --build --serve /var/otp
+    depends_on:
+      - db
 
 volumes:
   pgdata:
