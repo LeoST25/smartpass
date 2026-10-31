@@ -1,5 +1,6 @@
 import io
 from datetime import datetime
+from xml.sax.saxutils import escape
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, Image
@@ -90,6 +91,12 @@ def gerar_pdf_evidencia(dados_candidato, tipo_beneficio, dados_calculo, coords=N
             ["Endereço Destino", dados_calculo.get('destino', 'N/A'), "", ""],
             lin_headers
         ]
+
+        resumo_trajeto = dados_calculo.get("resumo_trajeto")
+        if resumo_trajeto:
+            story.append(Paragraph("Resumo do trajeto", heading_style))
+            story.append(Paragraph(escape(resumo_trajeto), styles['Normal']))
+            story.append(Spacer(1, 6))
         
         for det in dados_calculo.get('detalhes', []):
             tabela_vt_data.append([
