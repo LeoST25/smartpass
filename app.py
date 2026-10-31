@@ -1,5 +1,6 @@
 import streamlit as st
 from src.services.routing import calcular_vale_combustivel, calcular_vale_transporte
+from src.services.geocoding import buscar_coordenadas_por_cep_ou_endereco
 
 # Configuração da página
 st.set_page_config(
@@ -27,18 +28,36 @@ tipo_beneficio = st.sidebar.radio(
 # Conteúdo Principal
 if tipo_beneficio == "Vale-Combustível (VC)":
     st.header("🚗 Cálculo de Vale-Combustível")
-    st.info("Insira as coordenadas ou os pontos para obter a distância rodoviária exata e o custo.")
+    st.info("Digite o CEP ou Endereço de origem e destino para localizar as coordenadas automaticamente.")
     
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Origem (Residência)")
-        lat_origem = st.number_input("Latitude Origem", value=-23.5228, format="%.6f")
-        lon_origem = st.number_input("Longitude Origem", value=-46.8355, format="%.6f")
+        busca_origem = st.text_input("CEP ou Endereço de Origem", value="06310-000")
+        res_geo_origem = buscar_coordenadas_por_cep_ou_endereco(busca_origem) if busca_origem else None
+        
+        if res_geo_origem and res_geo_origem.get("sucesso"):
+            lat_origem = res_geo_origem["lat"]
+            lon_origem = res_geo_origem["lon"]
+            st.caption(f"📍 **Localizado:** {res_geo_origem['endereco_encontrado']}")
+        else:
+            st.warning("Origem não localizada. Usando coordenadas manuais.")
+            lat_origem = st.number_input("Lat Origem", value=-23.5228, format="%.6f")
+            lon_origem = st.number_input("Lon Origem", value=-46.8355, format="%.6f")
         
     with col2:
         st.subheader("Destino (Empresa/Unidade)")
-        lat_destino = st.number_input("Latitude Destino", value=-23.5505, format="%.6f")
-        lon_destino = st.number_input("Longitude Destino", value=-46.6333, format="%.6f")
+        busca_destino = st.text_input("CEP ou Endereço de Destino", value="Avenida Paulista, 1000, São Paulo")
+        res_geo_destino = buscar_coordenadas_por_cep_ou_endereco(busca_destino) if busca_destino else None
+        
+        if res_geo_destino and res_geo_destino.get("sucesso"):
+            lat_destino = res_geo_destino["lat"]
+            lon_destino = res_geo_destino["lon"]
+            st.caption(f"📍 **Localizado:** {res_geo_destino['endereco_encontrado']}")
+        else:
+            st.warning("Destino não localizado. Usando coordenadas manuais.")
+            lat_destino = st.number_input("Lat Destino", value=-23.5505, format="%.6f")
+            lon_destino = st.number_input("Lon Destino", value=-46.6333, format="%.6f")
         
     valor_km = st.number_input("Valor do KM Contratado (R$)", value=1.25, step=0.05)
     
@@ -57,7 +76,6 @@ else:
     st.header("🚌 Cálculo de Vale-Transporte")
     st.info("Informe os dados do itinerário e valores das passagens diárias.")
     
-    # Simulação simples de entrada de linhas
     num_linhas = st.number_input("Quantidade de linhas/modais utilizados (Ida e Volta)", min_value=1, max_value=6, value=2)
     
     linhas = []
