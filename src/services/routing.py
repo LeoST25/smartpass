@@ -1,5 +1,6 @@
 import os
 import requests
+from src.services.transit_api import consultar_linhas_transporte_oficial
 
 def calcular_vale_combustivel(origem_lat, origem_lon, destino_lat, destino_lon, valor_por_km):
     """
@@ -30,38 +31,29 @@ def calcular_vale_combustivel(origem_lat, origem_lon, destino_lat, destino_lon, 
 
 def roteirizar_vale_transporte_automatico(origem_lat, origem_lon, destino_lat, destino_lon):
     """
-    Calcula a rota e infere a combinação de modais/linhas de transporte público
-    com base na distância e nos corredores integrados de transporte.
+    Obtém itinerário e linhas oficiais via API de transporte e calcula o custo mensal.
     """
-    # Consulta a distância física do percurso via OSRM
     url = f"http://router.project-osrm.org/route/v1/driving/{origem_lon},{origem_lat};{destino_lon},{destino_lat}?overview=false"
+    distancia_km = 10.0
     
     try:
         resp = requests.get(url, timeout=10)
         data = resp.json()
-        distancia_km = 10.0
         if data.get("code") == "Ok":
             distancia_km = data["routes"][0]["distance"] / 1000.0
+    except Exception:
+        pass
 
-        linhas = []
-        # Regra de inferência de trechos baseada na extensão do trajeto
-        if distancia_km <= 8.0:
-            linhas.append({"linha": "Ônibus Municipal / Local", "valor": 6.70, "quantidade_dia": 2})
-        elif distancia_km <= 20.0:
-            linhas.append({"linha": "Ônibus Intermunicipal (EMTU / Local)", "valor": 5.65, "quantidade_dia": 2})
-            linhas.append({"linha": "Metrô / Trem (CPTM)", "valor": 5.00, "quantidade_dia": 2})
-        else:
-            linhas.append({"linha": "Ônibus Alimentador", "valor": 6.70, "quantidade_dia": 2})
-            linhas.append({"linha": "Trem / Metrô (Linha Troncal)", "valor": 5.00, "quantidade_dia": 2})
-            linhas.append({"linha": "Ônibus Intermunicipal Integrado", "valor": 5.65, "quantidade_dia": 2})
+    # Consulta a API oficial / matriz de transporte
+    res_oficial = consultar_linhas_transporte_oficial(origem_lat, origem_lon, destino_lat, destino_lon)
+    linhas = res_oficial.get("detalhes", [])
 
-        res_vt = calcular_vale_transporte(linhas)
-        res_vt["distancia_km"] = round(distancia_km, 2)
-        res_vt["sucesso"] = True
-        return res_vt
-
-    except Exception as e:
-        return {"sucesso": False, "erro": str(e)}
+    res_vt = calcular_vale_transporte(linhas)
+    res_vt["distancia_km"] = round(distancia_km, 2)
+    res_vt["fonte"] = res_oficial.get("fonte", "Oficial / Estimada")
+    res_vt["sucesso"] = True
+    
+    return res_vt
 
 
 def calcular_vale_transporte(linhas_onibus):
@@ -72,11 +64,11 @@ def calcular_vale_transporte(linhas_onibus):
     detalhes = []
     
     for item in linhas_onibus:
-        subtotal = item["valor"] * item.get("quantidade_dia", 2)
+        subtotal = item.get("valor_unitario", item.get("valor", 0.0)) * item.get("quantidade_dia", 2)
         custo_diario += subtotal
         detalhes.append({
             "linha": item["linha"],
-            "valor_unitario": item["valor"],
+            "valor_unitario": item.get("valor_unitario", item.get("valor", 0.0)),
             "quantidade_dia": item.get("quantidade_dia", 2),
             "subtotal": subtotal
         })
