@@ -1,116 +1,120 @@
-"""Resolução de itinerários de transporte público para a RMSP."""
+"""Roteamento de transporte público via OpenTripPlanner (OTP)."""
 
-import json
 import os
-from typing import Any
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
-
-_RESPONSE_SCHEMA = {
-    "type": "OBJECT",
-    "properties": {
-        "linhas": {
-            "type": "ARRAY",
-            "items": {
-                "type": "OBJECT",
-                "properties": {
-                    "linha": {"type": "STRING"},
-                    "valor_unitario": {"type": "NUMBER"},
-                    "quantidade_dia": {"type": "INTEGER"},
-                },
-                "required": ["linha", "valor_unitario", "quantidade_dia"],
-            },
-        },
-        "distancia_km": {"type": "NUMBER"},
-        "resumo_trajeto": {"type": "STRING"},
-    },
-    "required": ["linhas", "distancia_km", "resumo_trajeto"],
-}
+OTP_GRAPHQL_URL = os.getenv("OTP_GRAPHQL_URL", "http://localhost:8080/otp/gtfs/v1")
+VT_TARIFA_PADRAO = float(os.getenv("VT_TARIFA_PADRAO", "5.00"))
+TIMEZONE_RMSP = ZoneInfo("America/Sao_Paulo")
 
 
-def _montar_prompt(origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem, endereco_destino):
+def _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon):
+    """Monta a consulta GraphQL compatível com OTP 2.7+."""
+    data_hora = datetime.now(TIMEZONE_RMSP).isoformat(timespec="minutes")
     return f"""
-Você é um planejador de transporte público da Região Metropolitana de São Paulo.
-Determine um itinerário prático de ida entre os dados abaixo, priorizando linhas
-reais de SPTrans, EMTU, CPTM e Metrô. Informe somente embarques tarifados que
-compõem o benefício; não invente linhas, integrações ou tarifas. Considere que
-quantidade_dia é a quantidade de utilizações de cada modal no dia completo
-(ida e volta), normalmente 2 por embarque. Use a melhor estimativa pública de
-tarifa vigente e deixe de fora trechos a pé.
-
-Origem: {endereco_origem} ({origem_lat}, {origem_lon})
-Destino: {endereco_destino} ({destino_lat}, {destino_lon})
-
-Retorne exclusivamente o JSON no schema solicitado. distancia_km é a extensão
-aproximada do percurso de transporte público, em quilômetros. resumo_trajeto
-deve ser breve, em português, e indicar os modais e as baldeações.
-""".strip()
-
-
-def _validar_resposta(payload: Any) -> dict[str, Any]:
-    """Normaliza e valida o contrato público da resposta do agente."""
-    if not isinstance(payload, dict):
-        raise ValueError("A resposta do agente não é um objeto JSON.")
-    linhas_brutas = payload.get("linhas")
-    if not isinstance(linhas_brutas, list) or not linhas_brutas:
-        raise ValueError("A resposta não contém linhas de transporte.")
-
-    linhas = []
-    for item in linhas_brutas:
-        if not isinstance(item, dict):
-            raise ValueError("Linha de transporte inválida.")
-        linha = str(item.get("linha", "")).strip()
-        valor = float(item.get("valor_unitario"))
-        quantidade = int(item.get("quantidade_dia"))
-        if not linha or not 0 < valor <= 100 or not 0 < quantidade <= 12:
-            raise ValueError("Valores de transporte fora dos limites aceitos.")
-        linhas.append({"linha": linha, "valor_unitario": round(valor, 2), "quantidade_dia": quantidade})
-
-    distancia = float(payload.get("distancia_km"))
-    resumo = str(payload.get("resumo_trajeto", "")).strip()
-    if not 0 < distancia <= 500 or not resumo:
-        raise ValueError("Distância ou resumo do trajeto inválido.")
-    return {"linhas": linhas, "distancia_km": round(distancia, 2), "resumo_trajeto": resumo}
+    {{
+      planConnection(
+        origin: {{ location: {{ coordinate: {{ latitude: {origem_lat}, longitude: {origem_lon} }} }} }}
+        destination: {{ location: {{ coordinate: {{ latitude: {destino_lat}, longitude: {destino_lon} }} }} }}
+        dateTime: {{ earliestDeparture: \"{data_hora}\" }}
+        modes: {{
+          direct: [WALK]
+          transit: {{ transit: [{{ mode: BUS }}, {{ mode: RAIL }}, {{ mode: SUBWAY }}, {{ mode: TRAM }}] }}
+        }}
+        first: 3
+      ) {{
+        edges {{
+          node {{
+            legs {{
+              mode
+              distance
+              from {{ name }}
+              to {{ name }}
+              route {{ shortName longName }}
+            }}
+          }}
+        }}
+      }}
+    }}
+    """
 
 
-def resolver_itinerario_com_gemini(origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem, endereco_destino):
-    """Consulta o Gemini e devolve somente uma resposta validada."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY não configurada.")
-    try:
-        from google import genai
-    except ImportError as exc:
-        raise RuntimeError("Dependência google-genai não instalada.") from exc
+def _nome_linha(leg):
+    rota = leg.get("route") or {}
+    curto = (rota.get("shortName") or "").strip()
+    longo = (rota.get("longName") or "").strip()
+    modo = (leg.get("mode") or "TRANSPORTE").replace("_", " ").title()
+    if curto and longo:
+        return f"{modo} {curto} — {longo}"
+    return f"{modo} {curto or longo}".strip()
 
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=_montar_prompt(origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem, endereco_destino),
-        config={"response_mime_type": "application/json", "response_schema": _RESPONSE_SCHEMA, "temperature": 0.1},
+
+def _extrair_itinerario_otp(payload):
+    """Converte a resposta GraphQL do OTP para o contrato do SmartPass."""
+    erros = payload.get("errors") or []
+    if erros:
+        raise RuntimeError(erros[0].get("message", "OTP rejeitou a consulta."))
+
+    edges = payload.get("data", {}).get("planConnection", {}).get("edges", [])
+    if not edges:
+        raise RuntimeError("OTP não encontrou itinerários de transporte para este trajeto.")
+
+    legs = edges[0].get("node", {}).get("legs", [])
+    legs_transito = [leg for leg in legs if leg.get("route")]
+    if not legs_transito:
+        raise RuntimeError("OTP retornou somente percurso a pé.")
+
+    linhas = [
+        {
+            "linha": _nome_linha(leg),
+            "valor_unitario": round(VT_TARIFA_PADRAO, 2),
+            "quantidade_dia": 2,
+        }
+        for leg in legs_transito
+    ]
+    distancia_km = sum(float(leg.get("distance") or 0) for leg in legs) / 1000
+    descricao = [
+        f"{_nome_linha(leg)} ({(leg.get('from') or {}).get('name', 'origem')} → {(leg.get('to') or {}).get('name', 'destino')})"
+        for leg in legs_transito
+    ]
+    baldeacoes = max(len(legs_transito) - 1, 0)
+    resumo = "; ".join(descricao)
+    if baldeacoes:
+        resumo += f". {baldeacoes} baldeação(ões) sugerida(s)."
+
+    return {"linhas": linhas, "distancia_km": round(distancia_km, 2), "resumo_trajeto": resumo}
+
+
+def resolver_itinerario_com_otp(origem_lat, origem_lon, destino_lat, destino_lon):
+    """Obtém itinerários reais dos feeds GTFS carregados no OTP local."""
+    response = requests.post(
+        OTP_GRAPHQL_URL,
+        json={"query": _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon)},
+        timeout=20,
     )
-    if not response.text:
-        raise RuntimeError("Gemini retornou uma resposta vazia.")
-    return _validar_resposta(json.loads(response.text))
+    response.raise_for_status()
+    return _extrair_itinerario_otp(response.json())
 
 
-def estimar_itinerario_fallback(distancia_km: float) -> dict[str, Any]:
-    """Mantém o cálculo disponível quando o provedor externo falha."""
+def estimar_itinerario_fallback(distancia_km: float):
+    """Mantém o cálculo disponível quando o roteador local está indisponível."""
     return {
         "linhas": [{"linha": "Estimativa: transporte público urbano (validar com colaborador)", "valor_unitario": 5.00, "quantidade_dia": 2}],
         "distancia_km": round(max(distancia_km, 0.1), 2),
-        "resumo_trajeto": "Não foi possível consultar o roteador inteligente. Estimativa provisória para validação manual pelo time de Admissão.",
+        "resumo_trajeto": "OpenTripPlanner indisponível ou sem GTFS aplicável. Estimativa provisória para validação manual pelo time de Admissão.",
     }
 
 
-def consultar_linhas_transporte_oficial(origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem="Origem não informada", endereco_destino="Destino não informado"):
-    """Compatibilidade com o serviço anterior, agora priorizando o Gemini."""
+def consultar_linhas_transporte_oficial(origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem="", endereco_destino=""):
+    """Compatibilidade com o serviço anterior, agora usando OTP como fonte primária."""
     try:
-        resultado = resolver_itinerario_com_gemini(origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem, endereco_destino)
-        return {"sucesso": True, "fonte": f"Gemini ({GEMINI_MODEL})", **resultado}
-    except Exception as exc:  # O cálculo não pode depender de um serviço de IA.
+        resultado = resolver_itinerario_com_otp(origem_lat, origem_lon, destino_lat, destino_lon)
+        return {"sucesso": True, "fonte": "OpenTripPlanner (GTFS local)", **resultado}
+    except (requests.RequestException, ValueError, TypeError, RuntimeError) as exc:
         return {"sucesso": False, "fonte": "Estimativa de contingência", "erro": str(exc), "detalhes": []}

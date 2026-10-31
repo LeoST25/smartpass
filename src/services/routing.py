@@ -24,7 +24,7 @@ def calcular_vale_combustivel(origem_lat, origem_lon, destino_lat, destino_lon, 
 
 
 def roteirizar_vale_transporte_automatico(origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem="Origem não informada", endereco_destino="Destino não informado"):
-    """Usa Gemini como motor principal de VT e estimativa apenas em contingência."""
+    """Usa OpenTripPlanner como motor principal de VT e estimativa em contingência."""
     distancia_fallback = _distancia_rodoviaria_km(origem_lat, origem_lon, destino_lat, destino_lon)
     resposta = consultar_linhas_transporte_oficial(
         origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem, endereco_destino
