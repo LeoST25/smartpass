@@ -95,21 +95,31 @@ else:
     st.header("🚌 Cálculo Automático de Vale-Transporte")
     
     if st.button("Calcular Itinerário de Vale-Transporte", type="primary"):
-        res = roteirizar_vale_transporte_automatico(lat_origem, lon_origem, lat_destino, lon_destino)
+        endereco_origem = res_geo_origem.get("endereco_encontrado", busca_origem) if res_geo_origem else busca_origem
+        endereco_destino = res_geo_destino.get("endereco_encontrado", busca_destino) if res_geo_destino else busca_destino
+        res = roteirizar_vale_transporte_automatico(
+            lat_origem, lon_origem, lat_destino, lon_destino, endereco_origem, endereco_destino
+        )
         if res.get("sucesso"):
             st.success("Rota de transporte público identificada com sucesso!")
+            if res.get("aviso"):
+                st.warning(f"Roteirização inteligente indisponível: {res['aviso']}")
             
             m1, m2, m3 = st.columns(3)
             m1.metric("Distância do Trajeto", f"{res['distancia_km']} km")
             m2.metric("Custo Diário Total", f"R$ {res['custo_diario']:.2f}")
             m3.metric("Estimativa Mensal (22 dias)", f"R$ {res['custo_mensal']:.2f}")
 
+            st.subheader("Resumo do trajeto")
+            st.write(res["resumo_trajeto"])
+            st.caption(f"Fonte da roteirização: {res['fonte']}")
+
             st.subheader("Linhas e Modais Sugeridos")
             st.table(res["detalhes"])
 
             dados_pdf = res.copy()
-            dados_pdf["origem"] = res_geo_origem.get("endereco_encontrado", busca_origem) if res_geo_origem else busca_origem
-            dados_pdf["destino"] = res_geo_destino.get("endereco_encontrado", busca_destino) if res_geo_destino else busca_destino
+            dados_pdf["origem"] = endereco_origem
+            dados_pdf["destino"] = endereco_destino
 
             pdf_bytes = gerar_pdf_evidencia(dados_candidato, "Vale-Transporte (VT)", dados_pdf, coords=coords)
 

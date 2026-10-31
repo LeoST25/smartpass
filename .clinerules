@@ -1,0 +1,14 @@
+# Diretrizes do Projeto SmartPass
+
+1. Arquitetura e Privacidade:
+   - A aplicação DEVE permanecer stateless. Não grave dados de candidatos em bancos de dados local ou remoto (Conformidade LGPD).
+   - Manipule PDFs e mapas estáticos sempre em memória utilizando BytesIO.
+
+2. Padrões de Código:
+   - Python 3.10+ PEP8.
+   - Toda função em `src/services/` deve retornar dicionários padronizados com chave `"sucesso": True/False`.
+   - Mantenha tratamento de exceção (try/except) e fallbacks em chamadas de APIs externas.
+
+3. Workflow Git:
+   - Sempre verifique a branch atual antes de alterar arquivos.
+   - Siga a convenção de commits semânticos (feat:, fix:, refactor:, docs:).

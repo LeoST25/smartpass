@@ -2,4 +2,6 @@ streamlit
 python-dotenv
 requests
 pytest
-pip freeze > requirements.txt
+google-genai
+reportlab
+matplotlib
