@@ -19,7 +19,13 @@ O OTP cria `graph.obj` nesta pasta na primeira execução. Não versione os feed
 nem o grafo, pois eles podem conter muitos dados e devem ser atualizados fora do
 código.
 
-Para iniciar o roteador:
+Primeiro, gere o grafo (repita este passo sempre que atualizar os feeds):
+
+```bash
+docker compose -f infra/docker-compose.yml run --rm otp-build
+```
+
+Depois, suba o servidor:
 
 ```bash
 docker compose -f infra/docker-compose.yml up otp
