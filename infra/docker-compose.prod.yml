@@ -1,0 +1,78 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    volumes:
+      - pgdata_prod:/var/lib/postgresql/data
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    networks:
+      - smartpass_prod
+
+  otp:
+    volumes:
+      - ./otp-data:/var/opentripplanner
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+    networks:
+      - smartpass_prod
+
+  otp-build:
+    volumes:
+      - ./otp-data:/var/opentripplanner
+    networks:
+      - smartpass_prod
+    deploy:
+      resources:
+        limits:
+          memory: 10G
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: production
+    image: smartpass:app-prod
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-smartpass}
+      DB_USER: ${DB_USER:-smartpass_user}
+      DB_PASS: ${DB_PASS:-changeme}
+      OTP_GRAPHQL_URL: http://otp:8080/otp/gtfs/v1
+      STREAMLIT_ENV: production
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    networks:
+      - smartpass_prod
+
+networks:
+  smartpass_prod:
+    name: smartpass_prod
+    driver: bridge
+
+volumes:
+  pgdata_prod:

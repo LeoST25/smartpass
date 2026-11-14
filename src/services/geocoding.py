@@ -83,8 +83,15 @@ def buscar_coordenadas_por_cep_ou_endereco(busca_texto):
 
                 # Tentativa B: Se a rua falhou, busca por Bairro + Cidade + UF
                 partes_resumidas = [p for p in [bairro, cidade, uf, "Brasil"] if p]
-                if partes_resumidas:
+                if bairro and partes_resumidas:
                     res = _consultar_nominatim(", ".join(partes_resumidas))
+                    if res.get("sucesso"):
+                        return res
+
+                # Tentativa B2: CEP geral sem logradouro — fallback município (ex: 06310-000 Carapicuíba)
+                if not logradouro and cidade and uf:
+                    query_municipio = f"{cidade}, {uf}, Brasil"
+                    res = _consultar_nominatim(query_municipio)
                     if res.get("sucesso"):
                         return res
         except requests.RequestException:

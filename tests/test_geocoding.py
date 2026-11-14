@@ -99,6 +99,32 @@ def test_buscar_entrada_vazia_retorna_erro():
     assert "erro" in res
 
 
+def test_buscar_cep_geral_municipio_sem_logradouro_fallback_estruturado():
+    """CEP geral (ex: 06310-000) com logradouro vazio deve cair para 'Carapicuíba, SP, Brasil'."""
+    viacep_data = {
+        "cep": "06310-000",
+        "logradouro": "",
+        "complemento": "",
+        "bairro": "",
+        "localidade": "Carapicuíba",
+        "uf": "SP",
+    }
+    with patch("src.services.geocoding.requests.get") as mock_get:
+        # ViaCEP ok, Nominatim query completa falha, fallback município ok
+        mock_get.side_effect = [
+            _mock_resp(viacep_data),
+            _mock_resp([]),  # query completa "Carapicuíba, SP, Brasil" falha na tentativa A (duplicada lógica testará deduplicação)
+            _mock_resp([{"lat": "-23.522", "lon": "-46.836", "display_name": "Carapicuíba, SP, Brasil"}]),
+        ]
+        res = buscar_coordenadas_por_cep_ou_endereco("06310-000")
+        assert res["sucesso"] is True
+        assert res["lat"] == pytest.approx(-23.522)
+        # garante que a última chamada usou o fallback estruturado
+        chamadas = [str(c) for c in mock_get.call_args_list]
+        # a query município deve ter sido consultada (verifica params q ou postalcode)
+        assert any("Carapicu" in str(c) for c in chamadas)
+
+
 def test_nominatim_timeout_retorna_falha():
     import requests
 
