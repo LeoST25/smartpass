@@ -193,6 +193,47 @@ def gerar_pdf_evidencia(dados_candidato, tipo_beneficio, dados_calculo, coords=N
             story.append(Paragraph(f"<b>Justificativa:</b> {escape(str(justificativa))}", styles['Normal']))
         story.append(Spacer(1, 8))
 
+    # 3d. Rateio CLT — Lei 7.418/85 (6% sobre salário-base) — quadro Empresa vs Colaborador
+    viab = dados_calculo.get("viabilidade_clt")
+    if viab and isinstance(viab, dict) and viab.get("sucesso"):
+        salario_pdf = dados_calculo.get("salario_base")
+        # só exibe quadro quando salário foi informado (>0) — evita rateio zerado não informativo
+        if salario_pdf and float(salario_pdf) > 0:
+            story.append(Paragraph("Rateio CLT — Lei 7.418/85 (Teto 6% sobre Salário-Base)", heading_style))
+            custo_m = dados_calculo.get("custo_mensal", 0)
+            teto = viab.get("teto_desconto_6_pct", 0)
+            desc = viab.get("desconto_colaborador", 0)
+            cust = viab.get("custeio_empresa", 0)
+            status = "VT Vantajoso" if viab.get("vt_vantajoso") else "Alerta RH — não vantajoso"
+            tabela_clt_data = [
+                ["Componente", "Valor (R$)"],
+                ["Salário Base informado", f"R$ {float(salario_pdf):.2f}"],
+                ["Teto desconto 6% (CLT)", f"R$ {float(teto):.2f}"],
+                ["Custo mensal VT", f"R$ {float(custo_m):.2f}"],
+                ["Desconto colaborador (até teto)", f"R$ {float(desc):.2f}"],
+                ["Subsídio empresa (excedente)", f"R$ {float(cust):.2f}"],
+                ["Status viabilidade", status],
+            ]
+            tabela_clt = Table(tabela_clt_data, colWidths=[260, 280])
+            tabela_clt.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1E3A8A')),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
+                ('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#EFF6FF') if viab.get("vt_vantajoso") else colors.HexColor('#FEF3C7')),
+                ('FONTNAME', (0,-1), (-1,-1), 'Helvetica-Bold'),
+                ('PADDING', (0,0), (-1,-1), 5),
+            ]))
+            story.append(tabela_clt)
+            story.append(Spacer(1, 6))
+            story.append(Paragraph(f"<b>Recomendação:</b> {escape(str(viab.get('recomendacao','')))}", styles['Normal']))
+            story.append(Spacer(1, 4))
+            for linha in viab.get("memoria_calculo", []):
+                story.append(Paragraph(f"• {escape(str(linha))}", styles['Normal']))
+            story.append(Spacer(1, 4))
+            story.append(Paragraph("<i>Base legal: art.4º, parágrafo único, Lei 7.418/85 — desconto máximo de 6% sobre salário-base; excedente custeado pelo empregador.</i>", styles['Normal']))
+            story.append(Spacer(1, 8))
+
     story.append(Spacer(1, 10))
 
     # 4. Evidência Cartográfica do Trajeto (Substitui Termos de Assinatura)
