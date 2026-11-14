@@ -1,0 +1,265 @@
+name: PR Guardian
+
+on:
+  pull_request:
+    branches: [dev, staging, main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+concurrency:
+  group: pr-guardian-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guardian:
+    name: Guardian — Auditoria Rígida
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (full history for gitleaks)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyyaml gitleaks 2>/dev/null || true
+
+      # ------------------------------------------------------------------
+      # 1 — Scan de segredos com gitleaks (bloqueante)
+      # ------------------------------------------------------------------
+      - name: Secret scan — gitleaks
+        id: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: false
+
+      # Fallback grep caso gitleaks não esteja disponível localmente (dry-run)
+      - name: Secret scan — fallback grep (zero segredos no diff)
+        if: always()
+        run: |
+          echo "::group::Fallback secret scan (grep)"
+          set +e
+          # Diff do PR vs base; para push/dry-run usa HEAD
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          if [ -z "$BASE_SHA" ]; then BASE_SHA="HEAD~1"; fi
+          if [ -z "$HEAD_SHA" ]; then HEAD_SHA="HEAD"; fi
+          echo "Base: $BASE_SHA  Head: $HEAD_SHA"
+          # Exclui o próprio workflow e docs de auditoria do diff para evitar falso-positivo auto-referencial
+          # (o workflow contém a regex e a documentação lista exemplos como DB_PASS/secrets.GITHUB_TOKEN)
+          git diff "$BASE_SHA".."$HEAD_SHA" --unified=0 -- ':(exclude).github/workflows/pr-guardian.yml' ':(exclude).opencode/agents/guardian.md' ':(exclude).github/pull_request_template.md' 2>/dev/null | grep -Ei "(api_key|apikey|password|passwd|secret|token|BEGIN PRIVATE KEY|aws_access_key|aws_secret)" | grep -v "secrets\.GITHUB_TOKEN" | grep -v "grep -Ei" | grep -v "seu_token_aqui" | grep -v "changeme" | grep -v "GITHUB_PERSONAL_ACCESS_TOKEN.*seu_token" && {
+            echo "::error::Possível segredo detectado no diff"
+            exit 1
+          } || echo "✅ Nenhum padrão de segredo no diff (grep)"
+          # Hardcode check em src/
+          if grep -R --include="*.py" -nE '(DB_PASS|DB_USER|SPTRANS_API_TOKEN)\s*=\s*["'\''][^"'\'' ]+["'\'']' src/ 2>/dev/null | grep -v "os.getenv" | grep -v "seu_token" | grep -v "changeme"; then
+            echo "::error::Possível hardcode de segredo em src/"
+            exit 1
+          fi
+          # .env não deve estar rastreado
+          if git ls-files | grep -qx "\.env"; then
+            echo "::error::.env está rastreado — deve estar em .gitignore"
+            exit 1
+          fi
+          echo "✅ Fallback secret scan PASS"
+          echo "::endgroup::"
+
+      # ------------------------------------------------------------------
+      # 2 — Verificação customizada: bloqueia gravação em disco fora de /tmp
+      # ------------------------------------------------------------------
+      - name: LGPD stateless — bloqueia escrita em disco fora de /tmp (src/services)
+        id: disk_guard
+        run: |
+          echo "::group::LGPD stateless — disk write guard"
+          python3 << 'PY'
+          import re, pathlib, sys
+
+          ROOT = pathlib.Path("src/services")
+          # Também verifica src/database se existir
+          roots = [ROOT]
+          db_root = pathlib.Path("src/database")
+          if db_root.exists():
+              roots.append(db_root)
+
+          ALLOW_TMP_RE = re.compile(r"/tmp")
+          # Padrões que indicam escrita em disco
+          PATTERNS = [
+              (re.compile(r'open\s*\(.*?["\']\s*[wa]\s*["\']'), "open(..., 'w'/'a') — escrita em disco"),
+              (re.compile(r'open\s*\(.*?,\s*["\']\s*[wa]\b'), "open(..., 'w'/'a') — escrita em disco"),
+              (re.compile(r'Path\s*\(.*?\)\.write_text'), "Path.write_text — escrita em disco"),
+              (re.compile(r'Path\s*\(.*?\)\.write_bytes'), "Path.write_bytes — escrita em disco"),
+              (re.compile(r'\.to_csv\s*\('), ".to_csv — verifique se usa BytesIO/StringIO"),
+              (re.compile(r'\.to_excel\s*\('), ".to_excel — verifique se usa BytesIO"),
+              (re.compile(r'pickle\.dump'), "pickle.dump — escrita em disco"),
+              (re.compile(r'os\.write\s*\('), "os.write — escrita em disco"),
+          ]
+
+          violacoes = []
+          allow_notes = []
+
+          for root in roots:
+              for p in root.rglob("*.py"):
+                  txt = p.read_text(encoding="utf-8", errors="ignore")
+                  lines = txt.splitlines()
+                  for idx, line in enumerate(lines, start=1):
+                      stripped = line.strip()
+                      # ignora comentários e docstrings de auditoria
+                      if stripped.startswith("#") and "ALLOW" in stripped:
+                          continue
+                      for rx, msg in PATTERNS:
+                          if rx.search(line):
+                              # Permite se BytesIO/StringIO ou /tmp na mesma linha ou nas 2 linhas vizinhas
+                              ctx = "\n".join(lines[max(0, idx-2): idx+1])
+                              if "BytesIO" in ctx or "StringIO" in ctx or "/tmp" in ctx or "ALLOW-DISK" in ctx:
+                                  # Para to_csv/to_excel, exige BytesIO/StringIO explicitamente
+                                  if msg.startswith(".to_csv") or msg.startswith(".to_excel"):
+                                      if "BytesIO" not in ctx and "StringIO" not in ctx:
+                                          violacoes.append(f"{p}:{idx} — {msg} — `{stripped[:140]}`")
+                                  continue
+                              # savefig: só permite BytesIO
+                              if "savefig" in line and "BytesIO" not in ctx:
+                                  violacoes.append(f"{p}:{idx} — savefig fora de BytesIO — `{stripped[:140]}`")
+                                  continue
+                              if "savefig" in line:
+                                  continue
+                              violacoes.append(f"{p}:{idx} — {msg} — `{stripped[:140]}`")
+
+          # Checagem adicional: src/app.py e services devem usar BytesIO para PDF/mapa
+          for must in [pathlib.Path("src/services/pdf_generator.py"), pathlib.Path("src/services/map_generator.py")]:
+              if must.exists():
+                  t = must.read_text(encoding="utf-8", errors="ignore")
+                  if "BytesIO" not in t:
+                      violacoes.append(f"{must}:1 — Arquivo deve usar io.BytesIO para LGPD stateless")
+
+          if violacoes:
+              print("❌ VIOLAÇÕES LGPD/stateless — gravação em disco fora de /tmp:")
+              for v in violacoes:
+                  print(f"  - {v}")
+                  print(f"::error file={v.split(':')[0]}::LGPD stateless: {v}")
+              sys.exit(1)
+          else:
+              print("✅ Stateless OK — nenhuma gravação em disco fora de /tmp/BytesIO em src/services e src/database")
+              # Lista arquivos verificados
+              for root in roots:
+                  for p in sorted(root.rglob("*.py")):
+                      print(f"  checked: {p}")
+
+          PY
+          echo "::endgroup::"
+
+      # ------------------------------------------------------------------
+      # 3 — Testes: pytest -v -k "not integration"
+      # ------------------------------------------------------------------
+      - name: Run tests (non-integration)
+        id: pytest
+        run: |
+          echo "::group::pytest -v -k 'not integration'"
+          pytest -v -k "not integration" 2>&1 | tee pytest.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          # Exporta resumo para comentário
+          echo "PYTEST_LOG<<EOF" >> "$GITHUB_ENV"
+          cat pytest.log >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
+          exit $EXIT_CODE
+          echo "::endgroup::"
+
+      # ------------------------------------------------------------------
+      # 4 — Validação de sintaxe YAML / AGENTS.md (não-bloqueante mas reporta)
+      # ------------------------------------------------------------------
+      - name: Validate workflow YAML syntax
+        if: always()
+        run: |
+          python3 -c "import yaml, pathlib; yaml.safe_load(open('.github/workflows/pr-guardian.yml')); print('✅ YAML pr-guardian.yml válido')"
+          python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci-cd.yml')); print('✅ YAML ci-cd.yml válido')"
+
+      - name: Check AGENTS.md presence
+        if: always()
+        run: |
+          test -f AGENTS.md && echo "✅ AGENTS.md presente" || (echo "::error::AGENTS.md ausente"; exit 1)
+          test -f .clinerules && echo "✅ .clinerules presente" || echo "⚠️ .clinerules ausente"
+
+      # ------------------------------------------------------------------
+      # 5 — Publicação automática de comentário resumo no PR
+      # ------------------------------------------------------------------
+      - name: Publish PR summary comment
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            let pytestLog = process.env.PYTEST_LOG || '';
+            // Limita tamanho do log para comentário
+            if (pytestLog.length > 4000) pytestLog = pytestLog.slice(-4000);
+            const gitleaksOutcome = '${{ steps.gitleaks.outcome }}' || 'unknown';
+            const diskOutcome = '${{ steps.disk_guard.outcome }}' || 'unknown';
+            const pytestOutcome = '${{ steps.pytest.outcome }}' || 'unknown';
+            const gitleaksIcon = gitleaksOutcome === 'success' ? '✅' : gitleaksOutcome === 'failure' ? '❌' : '⚠️';
+            const diskIcon = diskOutcome === 'success' ? '✅' : diskOutcome === 'failure' ? '❌' : '⚠️';
+            const pytestIcon = pytestOutcome === 'success' ? '✅' : pytestOutcome === 'failure' ? '❌' : '⚠️';
+            const overall = (gitleaksOutcome === 'success' && diskOutcome === 'success' && pytestOutcome === 'success') ? '✅ APROVADO' : '❌ REPROVADO';
+            const body = `## 🛡️ Relatório @guardian — PR #${{ github.event.pull_request.number }}
+
+            | # | Item | Status | Evidência |
+            |---|------|--------|-----------|
+            | 1 | Scan de segredos (gitleaks) | ${gitleaksIcon} ${gitleaksOutcome} | \`gitleaks/gitleaks-action@v2\` |
+            | 2 | LGPD stateless — escrita fora de \`/tmp\` bloqueada | ${diskIcon} ${diskOutcome} | \`src/services/*.py\`, \`src/database/*.py\` — apenas \`BytesIO\`/\`/tmp\` |
+            | 3 | Testes \`pytest -v -k "not integration"\` | ${pytestIcon} ${pytestOutcome} | \`pytest.log\` |
+            | 4 | AGENTS.md / .clinerules / YAML | ⚙️ verificado | \`AGENTS.md:1\`, \`.clinerules:1\` |
+
+            ### Veredito
+            **${overall}** — Workflow: \`${{ github.workflow }}\` • Commit: \`${{ github.sha }}\`.slice(0,7)
+
+            ${overall.includes('REPROVADO') ? '> Bloqueio: corrija os itens ❌ acima. O merge está protegido.' : '> Todos os checks críticos passaram. PR apto para revisão humana.'}
+
+            <details><summary>📋 pytest log (tail)</summary>
+
+            \`\`\`
+            ${pytestLog || '(sem log — step não executado)'}
+            \`\`\`
+            </details>
+
+            <sub>Gerado por \`.github/workflows/pr-guardian.yml\` • Agente \`@guardian\` (\`.opencode/agents/guardian.md\`) • Stateless/LGPD: PDFs e mapas em \`BytesIO\`</sub>
+            `;
+
+            // Upsert: procura comentário anterior do guardian e atualiza
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const marker = 'Relatório @guardian';
+            const existing = comments.find(c => c.body && c.body.includes(marker) && c.user.type === 'Bot');
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+              core.info(`Comentário atualizado: ${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+              core.info('Comentário criado');
+            }
+
