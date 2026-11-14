@@ -1,29 +1,86 @@
-version: '3.8'
-
 services:
   db:
-    image: postgis/postgis:15-3.3
-    container_name: smartpass_db
-    restart: always
+    image: postgis/postgis:16-3.4
     environment:
-      POSTGRES_USER: smartpass_user
-      POSTGRES_PASSWORD: smartpass_password
-      POSTGRES_DB: smartpass
-    ports:
-      - "5432:5432"
+      POSTGRES_DB: ${DB_NAME:-smartpass}
+      POSTGRES_USER: ${DB_USER:-smartpass_user}
+      POSTGRES_PASSWORD: ${DB_PASS:-changeme}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-smartpass_user} -d ${DB_NAME:-smartpass}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - smartpass
+    restart: unless-stopped
+
+  otp-build:
+    image: docker.io/opentripplanner/opentripplanner:2.7.0
+    environment:
+      JAVA_TOOL_OPTIONS: -Xmx14G
+    volumes:
+      - ./otp-data:/var/opentripplanner
+    command: --build --save
+    networks:
+      - smartpass
 
   otp:
-    image: docker.io/opentripplanner/opentripplanner:latest
-    container_name: smartpass_otp
+    image: docker.io/opentripplanner/opentripplanner:2.7.0
+    environment:
+      JAVA_TOOL_OPTIONS: -Xmx4G
     ports:
       - "8080:8080"
     volumes:
-      - ./otp-data:/var/otp
-    command: --build --serve /var/otp
+      - ./otp-data:/var/opentripplanner
+    command: --load --serve
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/otp/actuators/health || wget -qO- http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+    networks:
+      - smartpass
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: production
+    image: smartpass:app
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-smartpass}
+      DB_USER: ${DB_USER:-smartpass_user}
+      DB_PASS: ${DB_PASS:-changeme}
+      OTP_GRAPHQL_URL: http://otp:8080/otp/gtfs/v1
+      VT_TARIFA_PADRAO: ${VT_TARIFA_PADRAO:-5.00}
+      SPTRANS_API_TOKEN: ${SPTRANS_API_TOKEN:-}
+      STREAMLIT_ENV: production
+    ports:
+      - "8501:8501"
+    depends_on:
+      db:
+        condition: service_healthy
+      otp:
+        condition: service_healthy
+    networks:
+      - smartpass
+    restart: unless-stopped
+
+networks:
+  smartpass:
+    driver: bridge
 
 volumes:
   pgdata:

@@ -1,0 +1,45 @@
+services:
+  db:
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${DB_NAME:-smartpass}
+      POSTGRES_USER: ${DB_USER:-smartpass_user}
+      POSTGRES_PASSWORD: ${DB_PASS:-changeme}
+    restart: "no"
+    networks:
+      - smartpass
+
+  otp:
+    ports:
+      - "8080:8080"
+    restart: "no"
+    networks:
+      - smartpass
+
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: development
+    image: smartpass:app-dev
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-smartpass}
+      DB_USER: ${DB_USER:-smartpass_user}
+      DB_PASS: ${DB_PASS:-changeme}
+      OTP_GRAPHQL_URL: http://otp:8080/otp/gtfs/v1
+      STREAMLIT_ENV: development
+      DEBUG: "1"
+    volumes:
+      - ../src:/app/src
+    ports:
+      - "8501:8501"
+    restart: "no"
+    networks:
+      - smartpass
+
+networks:
+  smartpass:
+    name: smartpass_dev
