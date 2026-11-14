@@ -15,7 +15,12 @@ import pandas as pd
 from src.services.geocoding import buscar_coordenadas_por_cep_ou_endereco
 from src.services.map_generator import gerar_imagem_mapa_rota
 from src.services.pdf_generator import gerar_pdf_evidencia
-from src.services.routing import calcular_vale_combustivel, calcular_vale_transporte, roteirizar_vale_transporte_automatico
+from src.services.routing import (
+    calcular_vale_combustivel,
+    calcular_vale_transporte,
+    roteirizar_com_comparativo,
+    roteirizar_vale_transporte_automatico,
+)
 
 
 # -----------------------------------------------------------------------------
@@ -70,6 +75,8 @@ def _init_session():
         "ultimo_calculo_em": None,
         "batch_df": None,
         "batch_resultados": None,
+        "comparativo": None,
+        "rota_selecionada": "economica",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -190,11 +197,23 @@ def _processar_calculo(origem_txt, destino_txt, modalidade, dias_uteis, tarifa, 
 
     resultado_vt = None
     resultado_vc = None
+    comparativo = None
 
     if modalidade in ("Vale-Transporte", "Comparativo Completo"):
         vt_raw = roteirizar_vale_transporte_automatico(lat_o, lon_o, lat_d, lon_d, endereco_origem, endereco_destino)
         # Recalcula com parâmetros do usuário
         resultado_vt = _recalcular_vt_com_parametros(vt_raw, tarifa, dias_uteis)
+        # Motor fare_engine: comparativo econômica vs rápida (com integração temporal)
+        try:
+            comp_raw = roteirizar_com_comparativo(lat_o, lon_o, lat_d, lon_d, dias_uteis=int(dias_uteis))
+            if comp_raw.get("sucesso") and comp_raw.get("comparativo"):
+                comparativo = comp_raw["comparativo"]
+                # Anexa fonte/distância do comparativo ao VT para auditoria
+                if comparativo.get("rota_mais_rapida"):
+                    resultado_vt["comparativo"] = comparativo
+                    resultado_vt["fonte_comparativo"] = comp_raw.get("fonte")
+        except Exception:
+            comparativo = None
 
     if modalidade in ("Vale-Combustível", "Comparativo Completo"):
         vc_raw = calcular_vale_combustivel(lat_o, lon_o, lat_d, lon_d, valor_km)
@@ -224,7 +243,7 @@ def _processar_calculo(origem_txt, destino_txt, modalidade, dias_uteis, tarifa, 
 
     # Enriquecer com labels e aviso
     return (
-        {"sucesso": True, "principal": principal, "vt": resultado_vt, "vc": resultado_vc},
+        {"sucesso": True, "principal": principal, "vt": resultado_vt, "vc": resultado_vc, "comparativo": comparativo},
         coords,
         endereco_origem,
         endereco_destino,
@@ -312,8 +331,9 @@ def main():
 
         # Ações de limpeza
         if st.button("🧹 Limpar Simulação", width='stretch'):
-            for k in ["resultado", "resultado_vt", "resultado_vc", "coords", "pdf_buffer", "batch_df", "batch_resultados"]:
+            for k in ["resultado", "resultado_vt", "resultado_vc", "coords", "pdf_buffer", "batch_df", "batch_resultados", "comparativo"]:
                 st.session_state[k] = None
+            st.session_state["rota_selecionada"] = "economica"
             st.session_state["ultimo_calculo_em"] = None
             st.rerun()
 
@@ -444,6 +464,8 @@ def main():
                         st.session_state.resultado = payload["principal"]
                         st.session_state.resultado_vt = payload["vt"]
                         st.session_state.resultado_vc = payload["vc"]
+                        st.session_state.comparativo = payload.get("comparativo")
+                        st.session_state.rota_selecionada = "economica"
                         st.session_state.coords = coords
                         st.session_state.origem_label = origem_label
                         st.session_state.destino_label = destino_label
@@ -536,6 +558,73 @@ def main():
             st.warning(f"ℹ️ {resultado.get('aviso')} — Fonte: **{resultado.get('fonte','—')}**")
         elif resultado.get("fonte"):
             st.caption(f"Fonte da roteirização: **{resultado.get('fonte')}**  •  Atualizado em {st.session_state.ultimo_calculo_em.strftime('%d/%m/%Y %H:%M') if st.session_state.ultimo_calculo_em else ''}")
+
+        # Comparativo Econômica vs Rápida (fare_engine) — seletor e economia mensal
+        comparativo = st.session_state.get("comparativo")
+        if comparativo and comparativo.get("sucesso") and comparativo.get("rota_mais_rapida"):
+            rapida = comparativo["rota_mais_rapida"]
+            economica = comparativo.get("rota_mais_economica")
+            economia_mensal = comparativo.get("economia_mensal", 0.0)
+            # Métrica de economia (reflete no dashboard)
+            if economica is None:
+                st.warning(f"⚠️ Nenhuma rota elegível para 'Mais Econômica' (limite: ≤1.5 km caminhada e ≤3 baldeações). Exibindo apenas a mais rápida.")
+            else:
+                # Seletor
+                opcoes = ["Mais Econômica", "Mais Rápida"]
+                idx_default = 0 if st.session_state.get("rota_selecionada", "economica") == "economica" else 1
+                escolha = st.radio(
+                    "Comparativo de tarifa — escolha a referência para detalhamento e PDF:",
+                    options=opcoes,
+                    index=idx_default,
+                    horizontal=True,
+                    key="radio_comparativo",
+                )
+                st.session_state.rota_selecionada = "economica" if escolha == "Mais Econômica" else "rapida"
+                # Cards comparativos
+                col_r, col_e, col_ec = st.columns(3)
+                with col_r:
+                    st.markdown(
+                        f"""
+                        <div style="background:#EFF6FF;border:1px solid #DBEAFE;border-radius:12px;padding:12px 14px;">
+                        <b>⚡ Mais Rápida</b><br>
+                        {rapida.get('duracao_min',0)} min • {rapida.get('distancia_km',0)} km • {rapida.get('baldeacoes',0)} baldeações • {rapida.get('caminhada_km',0)} km caminhada<br>
+                        <b>R$ {rapida.get('custo_trecho',0):.2f}</b> / trecho • <b>R$ {rapida.get('custo_diario',0):.2f}</b> /dia • <b>R$ {rapida.get('custo_mensal',0):.2f}</b> /mês
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                with col_e:
+                    if economica:
+                        st.markdown(
+                            f"""
+                            <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-radius:12px;padding:12px 14px;">
+                            <b>💰 Mais Econômica</b> {"(empate)" if economica.get('indice')==rapida.get('indice') else ""}<br>
+                            {economica.get('duracao_min',0)} min • {economica.get('distancia_km',0)} km • {economica.get('baldeacoes',0)} baldeações • {economica.get('caminhada_km',0)} km caminhada<br>
+                            <b>R$ {economica.get('custo_trecho',0):.2f}</b> / trecho • <b>R$ {economica.get('custo_diario',0):.2f}</b> /dia • <b>R$ {economica.get('custo_mensal',0):.2f}</b> /mês
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.info("Sem rota econômica elegível.")
+                with col_ec:
+                    st.metric("💸 Economia mensal (vs rápida)", f"R$ {economia_mensal:.2f}", delta=f"-R$ {economia_mensal:.2f}" if economia_mensal>0 else "empate")
+                    st.caption(comparativo.get("justificativa",""))
+                # Detalhamento tarifário da rota selecionada
+                rota_ref = economica if st.session_state.rota_selecionada == "economica" and economica else rapida
+                if rota_ref.get("detalhamento_tarifario"):
+                    with st.expander("🧾 Detalhamento tarifário — rota selecionada", expanded=True):
+                        for linha in rota_ref["detalhamento_tarifario"]:
+                            st.markdown(f"- {linha}")
+                        # Memória de cálculo
+                        if rota_ref.get("memoria_calculo"):
+                            st.markdown("**Memória de cálculo (auditoria):**")
+                            for m in rota_ref["memoria_calculo"]:
+                                st.caption(f"• {m}")
+                # Atualiza métricas principais para refletir seleção (sobrescreve custo_diario/mensal do card superior se VT)
+                if modalidade_atual in ("Vale-Transporte", "Comparativo Completo") and rota_ref:
+                    # Re-renderiza métrica de economia no contexto já exibido via caption abaixo
+                    st.caption(f"Exibindo valores da rota **{'Mais Econômica' if st.session_state.rota_selecionada=='economica' and economica else 'Mais Rápida'}** — custo trecho R$ {rota_ref.get('custo_trecho',0):.2f} | diário R$ {rota_ref.get('custo_diario',0):.2f} | mensal R$ {rota_ref.get('custo_mensal',0):.2f}")
 
         # Comparativo: resumo rápido quando modo comparativo
         if modalidade_atual == "Comparativo Completo" and st.session_state.resultado_vt and st.session_state.resultado_vc:
@@ -685,7 +774,16 @@ def main():
             # O gerador espera dados_candidato, tipo_beneficio, dados_calculo, coords
             dados_candidato = {"nome": "Colaborador (simulação)", "cargo": "—", "centro_custo": "Simulação SmartPass"}
             tipo_pdf = modalidade_atual
-            # Escolhe dados_calculo conforme modalidade
+            # Escolhe dados_calculo conforme modalidade — inclui comparativo fare_engine quando disponível
+            comparativo_pdf = st.session_state.get("comparativo")
+            rota_sel = None
+            if comparativo_pdf and comparativo_pdf.get("sucesso"):
+                sel = st.session_state.get("rota_selecionada", "economica")
+                if sel == "economica" and comparativo_pdf.get("rota_mais_economica"):
+                    rota_sel = comparativo_pdf["rota_mais_economica"]
+                else:
+                    rota_sel = comparativo_pdf.get("rota_mais_rapida")
+
             if modalidade_atual == "Vale-Combustível":
                 dados_calc = {
                     "origem": st.session_state.origem_label,
@@ -697,26 +795,60 @@ def main():
                     "custo_mensal": vc.get("custo_mensal", 0) if vc else 0,
                 }
             elif modalidade_atual == "Vale-Transporte":
-                dados_calc = {
-                    "origem": st.session_state.origem_label,
-                    "destino": st.session_state.destino_label,
-                    "resumo_trajeto": vt.get("resumo_trajeto", "") if vt else "",
-                    "detalhes": vt.get("detalhes", []) if vt else [],
-                    "custo_diario": vt.get("custo_diario", 0) if vt else 0,
-                    "custo_mensal": vt.get("custo_mensal", 0) if vt else 0,
-                    "distancia_km": vt.get("distancia_km", 0) if vt else 0,
-                }
+                if rota_sel:
+                    dados_calc = {
+                        "origem": st.session_state.origem_label,
+                        "destino": st.session_state.destino_label,
+                        "resumo_trajeto": rota_sel.get("resumo_trajeto", vt.get("resumo_trajeto","") if vt else ""),
+                        "detalhes": rota_sel.get("detalhes", vt.get("detalhes", []) if vt else []),
+                        "detalhamento_tarifario": rota_sel.get("detalhamento_tarifario", []),
+                        "memoria_calculo": rota_sel.get("memoria_calculo", []) + (comparativo_pdf.get("memoria_calculo", []) if comparativo_pdf else []),
+                        "justificativa": rota_sel.get("justificativa", ""),
+                        "comparativo": comparativo_pdf,
+                        "custo_diario": rota_sel.get("custo_diario", vt.get("custo_diario",0) if vt else 0),
+                        "custo_mensal": rota_sel.get("custo_mensal", vt.get("custo_mensal",0) if vt else 0),
+                        "custo_trecho": rota_sel.get("custo_trecho", 0),
+                        "distancia_km": rota_sel.get("distancia_km", vt.get("distancia_km",0) if vt else 0),
+                        "dias_uteis": dias_uteis_atual,
+                    }
+                else:
+                    dados_calc = {
+                        "origem": st.session_state.origem_label,
+                        "destino": st.session_state.destino_label,
+                        "resumo_trajeto": vt.get("resumo_trajeto", "") if vt else "",
+                        "detalhes": vt.get("detalhes", []) if vt else [],
+                        "custo_diario": vt.get("custo_diario", 0) if vt else 0,
+                        "custo_mensal": vt.get("custo_mensal", 0) if vt else 0,
+                        "distancia_km": vt.get("distancia_km", 0) if vt else 0,
+                    }
             else:
-                # Comparativo: usa VT como base, anexa VC no resumo
-                dados_calc = {
-                    "origem": st.session_state.origem_label,
-                    "destino": st.session_state.destino_label,
-                    "resumo_trajeto": (vt.get("resumo_trajeto","") if vt else "") + (f" | VC: {vc.get('distancia_km')}km, R$ {vc.get('custo_diario',0):.2f}/dia" if vc else ""),
-                    "detalhes": vt.get("detalhes", []) if vt else [],
-                    "custo_diario": vt.get("custo_diario",0) if vt else 0,
-                    "custo_mensal": vt.get("custo_mensal",0) if vt else 0,
-                    "distancia_km": vt.get("distancia_km",0) if vt else 0,
-                }
+                # Comparativo: usa rota selecionada + VC no resumo
+                if rota_sel:
+                    dados_calc = {
+                        "origem": st.session_state.origem_label,
+                        "destino": st.session_state.destino_label,
+                        "resumo_trajeto": (rota_sel.get("resumo_trajeto","") or vt.get("resumo_trajeto","") if vt else "") + (f" | VC: {vc.get('distancia_km')}km, R$ {vc.get('custo_diario',0):.2f}/dia" if vc else ""),
+                        "detalhes": rota_sel.get("detalhes", vt.get("detalhes", []) if vt else []),
+                        "detalhamento_tarifario": rota_sel.get("detalhamento_tarifario", []),
+                        "memoria_calculo": rota_sel.get("memoria_calculo", []) + (comparativo_pdf.get("memoria_calculo", []) if comparativo_pdf else []),
+                        "justificativa": comparativo_pdf.get("justificativa", "") if comparativo_pdf else "",
+                        "comparativo": comparativo_pdf,
+                        "custo_diario": rota_sel.get("custo_diario",0) if rota_sel else (vt.get("custo_diario",0) if vt else 0),
+                        "custo_mensal": rota_sel.get("custo_mensal",0) if rota_sel else (vt.get("custo_mensal",0) if vt else 0),
+                        "custo_trecho": rota_sel.get("custo_trecho",0) if rota_sel else 0,
+                        "distancia_km": rota_sel.get("distancia_km", vt.get("distancia_km",0) if vt else 0),
+                        "dias_uteis": dias_uteis_atual,
+                    }
+                else:
+                    dados_calc = {
+                        "origem": st.session_state.origem_label,
+                        "destino": st.session_state.destino_label,
+                        "resumo_trajeto": (vt.get("resumo_trajeto","") if vt else "") + (f" | VC: {vc.get('distancia_km')}km, R$ {vc.get('custo_diario',0):.2f}/dia" if vc else ""),
+                        "detalhes": vt.get("detalhes", []) if vt else [],
+                        "custo_diario": vt.get("custo_diario",0) if vt else 0,
+                        "custo_mensal": vt.get("custo_mensal",0) if vt else 0,
+                        "distancia_km": vt.get("distancia_km",0) if vt else 0,
+                    }
 
             # Botão para gerar PDF (mantém em session_state)
             if st.button("📄 Gerar PDF em Memória (BytesIO)", width='stretch'):

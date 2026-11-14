@@ -57,7 +57,35 @@ def _nome_linha(leg):
 
 
 def _extrair_itinerario_otp(payload):
-    """Converte a resposta GraphQL do OTP para o contrato do SmartPass."""
+    """Converte a resposta GraphQL do OTP para o contrato do SmartPass (primeiro itinerário)."""
+    todos = _extrair_todos_itinerarios_otp(payload)
+    if not todos:
+        raise RuntimeError("OTP não encontrou itinerários de transporte para este trajeto.")
+    primeiro = todos[0]
+    # compat: retorna contrato legado
+    linhas = [
+        {
+            "linha": _nome_linha(leg),
+            "valor_unitario": round(VT_TARIFA_PADRAO, 2),
+            "quantidade_dia": 2,
+        }
+        for leg in primeiro["legs"]
+        if leg.get("route")
+    ]
+    return {
+        "linhas": linhas,
+        "legs": primeiro["legs"],
+        "legs_transito": [leg for leg in primeiro["legs"] if leg.get("route")],
+        "distancia_km": primeiro["distancia_km"],
+        "resumo_trajeto": primeiro["resumo_trajeto"],
+        "caminhada_km": primeiro["caminhada_km"],
+        "baldeacoes": primeiro["baldeacoes"],
+        "duracao_min": primeiro["duracao_min"],
+    }
+
+
+def _extrair_todos_itinerarios_otp(payload):
+    """Converte payload OTP para lista de itinerários enriquecidos (até 3)."""
     erros = payload.get("errors") or []
     if erros:
         raise RuntimeError(erros[0].get("message", "OTP rejeitou a consulta."))
@@ -66,30 +94,66 @@ def _extrair_itinerario_otp(payload):
     if not edges:
         raise RuntimeError("OTP não encontrou itinerários de transporte para este trajeto.")
 
-    legs = edges[0].get("node", {}).get("legs", [])
-    legs_transito = [leg for leg in legs if leg.get("route")]
-    if not legs_transito:
+    itinerarios = []
+    for edge in edges:
+        legs = edge.get("node", {}).get("legs", [])
+        legs_transito = [leg for leg in legs if leg.get("route")]
+        if not legs_transito:
+            continue
+
+        linhas = [
+            {
+                "linha": _nome_linha(leg),
+                "valor_unitario": round(VT_TARIFA_PADRAO, 2),
+                "quantidade_dia": 2,
+            }
+            for leg in legs_transito
+        ]
+        distancia_km = sum(float(leg.get("distance") or 0) for leg in legs) / 1000
+        caminhada_km = sum(float(leg.get("distance") or 0) for leg in legs if str(leg.get("mode", "")).upper() == "WALK") / 1000
+        # duração: tenta somar duration/duracao se existir, senão estima 18 km/h + 6min por baldeação
+        duracao_min = 0
+        for leg in legs:
+            d = leg.get("duration") or leg.get("duracao") or leg.get("duration_min")
+            if d is not None:
+                try:
+                    duracao_min += int(round(float(d) / 60)) if float(d) > 100 else int(round(float(d)))
+                    continue
+                except Exception:
+                    pass
+        if duracao_min == 0:
+            try:
+                duracao_min = int(round((distancia_km / 18.0) * 60 + max(len(legs_transito) - 1, 0) * 6))
+            except Exception:
+                duracao_min = 30
+        duracao_min = max(duracao_min, 5)
+
+        descricao = [
+            f"{_nome_linha(leg)} ({(leg.get('from') or {}).get('name', 'origem')} → {(leg.get('to') or {}).get('name', 'destino')})"
+            for leg in legs_transito
+        ]
+        baldeacoes = max(len(legs_transito) - 1, 0)
+        resumo = "; ".join(descricao)
+        if baldeacoes:
+            resumo += f". {baldeacoes} baldeação(ões) sugerida(s)."
+
+        itinerarios.append(
+            {
+                "legs": legs,
+                "legs_transito": legs_transito,
+                "linhas": linhas,
+                "distancia_km": round(distancia_km, 2),
+                "caminhada_km": round(caminhada_km, 2),
+                "baldeacoes": baldeacoes,
+                "duracao_min": duracao_min,
+                "duracao_total_min": duracao_min,
+                "resumo_trajeto": resumo,
+            }
+        )
+
+    if not itinerarios:
         raise RuntimeError("OTP retornou somente percurso a pé.")
-
-    linhas = [
-        {
-            "linha": _nome_linha(leg),
-            "valor_unitario": round(VT_TARIFA_PADRAO, 2),
-            "quantidade_dia": 2,
-        }
-        for leg in legs_transito
-    ]
-    distancia_km = sum(float(leg.get("distance") or 0) for leg in legs) / 1000
-    descricao = [
-        f"{_nome_linha(leg)} ({(leg.get('from') or {}).get('name', 'origem')} → {(leg.get('to') or {}).get('name', 'destino')})"
-        for leg in legs_transito
-    ]
-    baldeacoes = max(len(legs_transito) - 1, 0)
-    resumo = "; ".join(descricao)
-    if baldeacoes:
-        resumo += f". {baldeacoes} baldeação(ões) sugerida(s)."
-
-    return {"linhas": linhas, "distancia_km": round(distancia_km, 2), "resumo_trajeto": resumo}
+    return itinerarios
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -102,6 +166,18 @@ def resolver_itinerario_com_otp(origem_lat, origem_lon, destino_lat, destino_lon
     )
     response.raise_for_status()
     return _extrair_itinerario_otp(response.json())
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def resolver_todos_itinerarios_com_otp(origem_lat, origem_lon, destino_lat, destino_lon):
+    """Obtém até 3 itinerários OTP para comparativo econômica vs rápida. Cache 10min."""
+    response = requests.post(
+        OTP_GRAPHQL_URL,
+        json={"query": _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon)},
+        timeout=20,
+    )
+    response.raise_for_status()
+    return _extrair_todos_itinerarios_otp(response.json())
 
 
 def estimar_itinerario_fallback(distancia_km: float):
@@ -122,3 +198,12 @@ def consultar_linhas_transporte_oficial(origem_lat, origem_lon, destino_lat, des
         return {"sucesso": True, "fonte": "OpenTripPlanner (GTFS local)", **resultado}
     except (requests.RequestException, ValueError, TypeError, RuntimeError) as exc:
         return {"sucesso": False, "fonte": "Estimativa de contingência", "erro": str(exc), "detalhes": []}
+
+
+def consultar_todos_itinerarios_oficial(origem_lat, origem_lon, destino_lat, destino_lon):
+    """Retorna até 3 itinerários OTP para motor de economicidade; fallback em lista vazia."""
+    try:
+        itinerarios = resolver_todos_itinerarios_com_otp(origem_lat, origem_lon, destino_lat, destino_lon)
+        return {"sucesso": True, "fonte": "OpenTripPlanner (GTFS local)", "itinerarios": itinerarios}
+    except (requests.RequestException, ValueError, TypeError, RuntimeError) as exc:
+        return {"sucesso": False, "fonte": "Estimativa de contingência", "erro": str(exc), "itinerarios": []}
