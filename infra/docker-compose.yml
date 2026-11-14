@@ -1,6 +1,8 @@
 services:
   otp-build:
     image: docker.io/opentripplanner/opentripplanner:2.7.0
+    environment:
+      JAVA_TOOL_OPTIONS: -Xmx14G
     volumes:
       - ./otp-data:/var/opentripplanner
     command: --build --save
@@ -8,8 +10,17 @@ services:
   otp:
     image: docker.io/opentripplanner/opentripplanner:2.7.0
     container_name: smartpass_otp
+    environment:
+      JAVA_TOOL_OPTIONS: -Xmx4G
     ports:
       - "8080:8080"
     volumes:
       - ./otp-data:/var/opentripplanner
     command: --load --serve
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/otp/actuators/health || wget -qO- http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s

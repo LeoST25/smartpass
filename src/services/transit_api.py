@@ -5,6 +5,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
+import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -91,8 +92,9 @@ def _extrair_itinerario_otp(payload):
     return {"linhas": linhas, "distancia_km": round(distancia_km, 2), "resumo_trajeto": resumo}
 
 
+@st.cache_data(ttl=600, show_spinner=False)
 def resolver_itinerario_com_otp(origem_lat, origem_lon, destino_lat, destino_lon):
-    """Obtém itinerários reais dos feeds GTFS carregados no OTP local."""
+    """Obtém itinerários reais dos feeds GTFS carregados no OTP local. Cache 10min."""
     response = requests.post(
         OTP_GRAPHQL_URL,
         json={"query": _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon)},
@@ -105,7 +107,9 @@ def resolver_itinerario_com_otp(origem_lat, origem_lon, destino_lat, destino_lon
 def estimar_itinerario_fallback(distancia_km: float):
     """Mantém o cálculo disponível quando o roteador local está indisponível."""
     return {
-        "linhas": [{"linha": "Estimativa: transporte público urbano (validar com colaborador)", "valor_unitario": 5.00, "quantidade_dia": 2}],
+        "linhas": [
+            {"linha": "Estimativa: transporte público urbano (validar com colaborador)", "valor_unitario": 5.00, "quantidade_dia": 2}
+        ],
         "distancia_km": round(max(distancia_km, 0.1), 2),
         "resumo_trajeto": "OpenTripPlanner indisponível ou sem GTFS aplicável. Estimativa provisória para validação manual pelo time de Admissão.",
     }

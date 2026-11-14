@@ -19,6 +19,10 @@ O OTP cria `graph.obj` nesta pasta na primeira execução. Não versione os feed
 nem o grafo, pois eles podem conter muitos dados e devem ser atualizados fora do
 código.
 
+O Compose reserva 14 GiB de heap Java para o build e 4 GiB para o servidor. O
+extrato `sudeste-latest.osm.pbf` é grande; se o host não tiver ao menos 16 GiB
+livres, use um extrato OSM menor, recortado à RMSP.
+
 Primeiro, gere o grafo (repita este passo sempre que atualizar os feeds):
 
 ```bash
