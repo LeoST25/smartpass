@@ -59,7 +59,9 @@ jobs:
           if [ -z "$BASE_SHA" ]; then BASE_SHA="HEAD~1"; fi
           if [ -z "$HEAD_SHA" ]; then HEAD_SHA="HEAD"; fi
           echo "Base: $BASE_SHA  Head: $HEAD_SHA"
-          git diff "$BASE_SHA".."$HEAD_SHA" --unified=0 2>/dev/null | grep -Ei "(api_key|apikey|password|passwd|secret|token|BEGIN PRIVATE KEY|aws_access_key|aws_secret)" && {
+          # Exclui o próprio workflow e docs de auditoria do diff para evitar falso-positivo auto-referencial
+          # (o workflow contém a regex e a documentação lista exemplos como DB_PASS/secrets.GITHUB_TOKEN)
+          git diff "$BASE_SHA".."$HEAD_SHA" --unified=0 -- ':(exclude).github/workflows/pr-guardian.yml' ':(exclude).opencode/agents/guardian.md' ':(exclude).github/pull_request_template.md' 2>/dev/null | grep -Ei "(api_key|apikey|password|passwd|secret|token|BEGIN PRIVATE KEY|aws_access_key|aws_secret)" | grep -v "secrets\.GITHUB_TOKEN" | grep -v "grep -Ei" | grep -v "seu_token_aqui" | grep -v "changeme" | grep -v "GITHUB_PERSONAL_ACCESS_TOKEN.*seu_token" && {
             echo "::error::Possível segredo detectado no diff"
             exit 1
           } || echo "✅ Nenhum padrão de segredo no diff (grep)"
