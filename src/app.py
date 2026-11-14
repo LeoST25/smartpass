@@ -12,6 +12,7 @@ import requests
 import streamlit as st
 import pandas as pd
 
+from src.services.benefit_calculator import analisar_viabilidade_clt, parse_salario_brasileiro
 from src.services.geocoding import buscar_coordenadas_por_cep_ou_endereco
 from src.services.map_generator import gerar_imagem_mapa_rota
 from src.services.pdf_generator import gerar_pdf_evidencia
@@ -71,6 +72,7 @@ def _init_session():
         "dias_uteis": 22,
         "tarifa": 5.00,
         "valor_km": 1.25,
+        "salario_base": 0.0,
         "pdf_buffer": None,
         "ultimo_calculo_em": None,
         "batch_df": None,
@@ -325,6 +327,14 @@ def main():
                 format="%.2f",
                 help="Aplicado apenas em VC e Comparativo. Ex: R$ 1,25/km",
             )
+            salario_base_input = st.number_input(
+                "Salário Base (R$) — opcional (Lei 7.418/85)",
+                min_value=0.0,
+                value=float(st.session_state.get("salario_base", 0.0)),
+                step=100.0,
+                format="%.2f",
+                help="Se 0 = não informado. Quando preenchido, calcula teto 6% e rateio Empresa vs Colaborador. Dado mantido só em st.session_state (LGPD stateless).",
+            )
 
             st.markdown("")
             submitted = st.form_submit_button("🔍 Calcular Rota e Benefício", width='stretch', type="primary")
@@ -335,6 +345,7 @@ def main():
                 st.session_state[k] = None
             st.session_state["rota_selecionada"] = "economica"
             st.session_state["ultimo_calculo_em"] = None
+            st.session_state["salario_base"] = 0.0
             st.rerun()
 
         st.divider()
@@ -378,6 +389,13 @@ def main():
                             if pd.isna(origem_lote) or pd.isna(destino_lote):
                                 resultados_lote.append({"linha": idx + 1, "origem": str(origem_lote), "destino": str(destino_lote), "erro": "Origem/Destino ausente"})
                                 continue
+                            # Detecta salario_base opcional (aliases + sanitização BR)
+                            salario_raw_lote = None
+                            for cand in ["salario_base", "salario", "salario base", "salary", "salario_base_r$"]:
+                                if cand in df.columns:
+                                    salario_raw_lote = row.get(cand)
+                                    break
+                            salario_lote = parse_salario_brasileiro(salario_raw_lote) if salario_raw_lote is not None and not pd.isna(salario_raw_lote) else None
                             # Cálculo simplificado: usa VT
                             try:
                                 res_geo_o = buscar_coordenadas_por_cep_ou_endereco(str(origem_lote))
@@ -389,14 +407,27 @@ def main():
                                     res_geo_o["lat"], res_geo_o["lon"], res_geo_d["lat"], res_geo_d["lon"], str(origem_lote), str(destino_lote)
                                 )
                                 vt_adj = _recalcular_vt_com_parametros(vt, float(tarifa_input), int(dias_input))
+                                custo_m = vt_adj.get("custo_mensal", 0) or 0
+                                viab_lote = analisar_viabilidade_clt(float(custo_m), salario_lote)
+                                # status em caixa alta conforme ajuste #2
+                                if salario_lote is None or salario_lote <= 0:
+                                    status_clt = "NAO_INFORMADO"
+                                elif viab_lote.get("vt_vantajoso"):
+                                    status_clt = "VANTAJOSO"
+                                else:
+                                    status_clt = "NAO_VANTAJOSO"
                                 resultados_lote.append({
                                     "linha": idx + 1,
                                     "origem": str(origem_lote),
                                     "destino": str(destino_lote),
                                     "distancia_km": vt_adj.get("distancia_km"),
                                     "custo_diario": vt_adj.get("custo_diario"),
-                                    "custo_mensal": vt_adj.get("custo_mensal"),
+                                    "custo_mensal": custo_m,
                                     "fonte": vt_adj.get("fonte"),
+                                    "teto_6_pct": viab_lote.get("teto_desconto_6_pct", 0.0),
+                                    "desconto_colaborador": viab_lote.get("desconto_colaborador", 0.0),
+                                    "subsidio_empresa": viab_lote.get("custeio_empresa", 0.0),
+                                    "status_viabilidade_clt": status_clt,
                                 })
                             except Exception as exc:
                                 resultados_lote.append({"linha": idx + 1, "origem": str(origem_lote), "destino": str(destino_lote), "erro": str(exc)})
@@ -423,8 +454,8 @@ def main():
                 # Modelo para download — gerado em memória
                 st.markdown("**Modelo de planilha:**")
                 modelo = pd.DataFrame([
-                    {"nome": "Maria Silva", "origem": "06310-000", "destino": "Avenida Paulista, 1000, São Paulo"},
-                    {"nome": "João Souza", "origem": "04538-132", "destino": "Rua Funchal, 418, São Paulo"},
+                    {"nome": "Maria Silva", "origem": "06310-000", "destino": "Avenida Paulista, 1000, São Paulo", "salario_base": 2500.00},
+                    {"nome": "João Souza", "origem": "04538-132", "destino": "Rua Funchal, 418, São Paulo", "salario_base": 3500.00},
                 ])
                 buf_modelo = io.StringIO()
                 modelo.to_csv(buf_modelo, index=False)
@@ -435,7 +466,7 @@ def main():
                     mime="text/csv",
                     width='stretch',
                 )
-                st.caption("Colunas obrigatórias: **origem**, **destino**. Opcional: **nome**.")
+                st.caption("Colunas obrigatórias: **origem**, **destino**. Opcional: **nome**, **salario_base** (ex: 2500.00 ou R$ 2.500,00). Saída inclui **teto_6_pct, desconto_colaborador, subsidio_empresa, status_viabilidade_clt**.")
 
         st.divider()
         st.caption("🔒 **LGPD / Stateless:** nenhum dado persiste em banco. PDFs e mapas são gerados em `BytesIO` e mantidos apenas em `st.session_state`.")
@@ -473,6 +504,7 @@ def main():
                         st.session_state.dias_uteis = int(dias_input)
                         st.session_state.tarifa = float(tarifa_input)
                         st.session_state.valor_km = float(valor_km_input)
+                        st.session_state.salario_base = float(salario_base_input) if salario_base_input is not None else 0.0
                         st.session_state.ultimo_calculo_em = datetime.now()
                         st.session_state.pdf_buffer = None  # invalida PDF anterior
                         # Feedback
@@ -625,6 +657,40 @@ def main():
                 if modalidade_atual in ("Vale-Transporte", "Comparativo Completo") and rota_ref:
                     # Re-renderiza métrica de economia no contexto já exibido via caption abaixo
                     st.caption(f"Exibindo valores da rota **{'Mais Econômica' if st.session_state.rota_selecionada=='economica' and economica else 'Mais Rápida'}** — custo trecho R$ {rota_ref.get('custo_trecho',0):.2f} | diário R$ {rota_ref.get('custo_diario',0):.2f} | mensal R$ {rota_ref.get('custo_mensal',0):.2f}")
+
+        # --- Card/Banner de Viabilidade CLT 6% — reativo ao seletor Rápida/Econômica (ajuste #3) ---
+        if modalidade_atual in ("Vale-Transporte", "Comparativo Completo"):
+            # custo mensal da opção ativa (economica/rapida) ou fallback do VT
+            custo_clt = None
+            if comparativo and comparativo.get("sucesso"):
+                rapida_c = comparativo.get("rota_mais_rapida") or {}
+                economica_c = comparativo.get("rota_mais_economica")
+                rota_ativa = economica_c if st.session_state.get("rota_selecionada") == "economica" and economica_c else rapida_c
+                custo_clt = rota_ativa.get("custo_mensal")
+            if custo_clt is None:
+                custo_clt = (st.session_state.resultado_vt or {}).get("custo_mensal") or custo_mensal
+            salario_clt = float(st.session_state.get("salario_base", 0.0) or 0.0)
+            if salario_clt > 0 and custo_clt is not None:
+                try:
+                    viab = analisar_viabilidade_clt(float(custo_clt), salario_clt)
+                    # banner
+                    if viab.get("vt_vantajoso"):
+                        st.success(f"✅ **Viabilidade CLT 6% — VT Vantajoso** | {viab.get('recomendacao','')}")
+                    else:
+                        st.warning(f"⚠️ **Viabilidade CLT 6% — Alerta RH** | {viab.get('recomendacao','')}")
+                    c_a, c_b, c_c = st.columns(3)
+                    c_a.metric("Teto 6% (salário)", f"R$ {viab.get('teto_desconto_6_pct',0):.2f}", help=f"6% de R$ {salario_clt:.2f}")
+                    c_b.metric("Desconto colaborador", f"R$ {viab.get('desconto_colaborador',0):.2f}")
+                    c_c.metric("Subsídio empresa", f"R$ {viab.get('custeio_empresa',0):.2f}")
+                    with st.expander("📋 Memória CLT — Lei 7.418/85", expanded=False):
+                        for linha in viab.get("memoria_calculo", []):
+                            st.caption(f"• {linha}")
+                        st.caption(viab.get("justificativa",""))
+                except Exception:
+                    pass
+            elif salario_clt == 0 and custo_clt is not None:
+                st.info("ℹ️ **Viabilidade CLT 6%:** informe o **Salário Base (R$)** na barra lateral para ver o rateio Empresa vs Colaborador (Lei 7.418/85).")
+            # else: sem custo, não exibe
 
         # Comparativo: resumo rápido quando modo comparativo
         if modalidade_atual == "Comparativo Completo" and st.session_state.resultado_vt and st.session_state.resultado_vc:
@@ -849,6 +915,32 @@ def main():
                         "custo_mensal": vt.get("custo_mensal",0) if vt else 0,
                         "distancia_km": vt.get("distancia_km",0) if vt else 0,
                     }
+
+            # --- Viabilidade CLT para PDF — reativa ao seletor (ajuste #3) ---
+            try:
+                salario_pdf = float(st.session_state.get("salario_base", 0.0) or 0.0)
+                custo_pdf = float(dados_calc.get("custo_mensal", 0) or 0)
+                if salario_pdf > 0 and custo_pdf is not None:
+                    viab_pdf = analisar_viabilidade_clt(custo_pdf, salario_pdf)
+                    dados_calc["viabilidade_clt"] = viab_pdf
+                    dados_calc["salario_base"] = salario_pdf
+                    # Preview no dashboard antes do PDF
+                    st.markdown("##### ⚖️ Rateio CLT 6% — Lei 7.418/85 (prévia do PDF)")
+                    if viab_pdf.get("vt_vantajoso"):
+                        st.success(viab_pdf.get("recomendacao",""))
+                    else:
+                        st.warning(viab_pdf.get("recomendacao",""))
+                    pc1, pc2, pc3 = st.columns(3)
+                    pc1.metric("Teto 6%", f"R$ {viab_pdf.get('teto_desconto_6_pct',0):.2f}")
+                    pc2.metric("Desconto colaborador", f"R$ {viab_pdf.get('desconto_colaborador',0):.2f}")
+                    pc3.metric("Subsídio empresa", f"R$ {viab_pdf.get('custeio_empresa',0):.2f}")
+                    with st.expander("Memória CLT (irá para o PDF)"):
+                        for linha in viab_pdf.get("memoria_calculo", []):
+                            st.caption(f"• {linha}")
+                elif salario_pdf == 0:
+                    st.caption("ℹ️ Informe **Salário Base** na barra lateral para incluir o quadro de rateio CLT 6% no PDF.")
+            except Exception:
+                pass
 
             # Botão para gerar PDF (mantém em session_state)
             if st.button("📄 Gerar PDF em Memória (BytesIO)", width='stretch'):
