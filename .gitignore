@@ -8,3 +8,4 @@ infra/otp-data/graph.obj
 infra/otp-data/*.pbf
 infra/otp-data/*.zip
 infra/otp-data/graphs/
+opencode.json
