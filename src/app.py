@@ -13,6 +13,8 @@ import streamlit as st
 import pandas as pd
 
 from src.services.benefit_calculator import analisar_viabilidade_clt, parse_salario_brasileiro
+from src.services.calendar_engine import calcular_dias_uteis
+from src.services.export_formatter import gerar_export_compra, gerar_export_rubrica
 from src.services.geocoding import buscar_coordenadas_por_cep_ou_endereco
 from src.services.map_generator import gerar_imagem_mapa_rota
 from src.services.pdf_generator import gerar_pdf_evidencia
@@ -61,6 +63,7 @@ def _inject_css():
 
 
 def _init_session():
+    now = datetime.now()
     defaults = {
         "resultado": None,
         "resultado_vc": None,
@@ -79,6 +82,13 @@ def _init_session():
         "batch_resultados": None,
         "comparativo": None,
         "rota_selecionada": "economica",
+        "escala": "5x2",
+        "uf_destino": "SP",
+        "municipio_destino": "São Paulo",
+        "ano_ref": now.year,
+        "mes_ref": now.month,
+        "dias_override": None,
+        "memoria_calendario": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -307,9 +317,57 @@ def main():
             )
 
             st.markdown("**Parâmetros de Cálculo**")
+            # Calendário por escala/município — cálculo exato de dias úteis
+            st.markdown("*Calendário — escala e município da unidade*")
+            esc_opts = ["5x2", "6x1", "12x36", "Híbrido (3x2)"]
+            esc_default = st.session_state.get("escala", "5x2")
+            # normaliza label
+            if esc_default.lower().replace(" ", "") in ["hibrido(3x2)", "hibrido", "3x2"]:
+                esc_default = "Híbrido (3x2)"
+            escala_input = st.selectbox(
+                "Escala",
+                options=esc_opts,
+                index=esc_opts.index(esc_default) if esc_default in esc_opts else 0,
+                help="5x2 Seg-Sex | 6x1 folga domingo | 12x36 dia 1 trabalhado | Híbrido 3x2 Seg-Qua presenciais. Desconta feriados nacionais (inclui 20/11 Lei 14.759/2023) + municipais Grande SP.",
+            )
+            c_uf, c_mun = st.columns(2)
+            with c_uf:
+                uf_opts = ["SP", "RJ", "MG", "Outro"]
+                uf_cur = str(st.session_state.get("uf_destino", "SP")).upper()
+                if uf_cur not in uf_opts:
+                    uf_cur = "SP"
+                uf_input = st.selectbox("UF unidade", options=uf_opts, index=uf_opts.index(uf_cur))
+            with c_mun:
+                mun_opts = ["São Paulo", "Carapicuíba", "Osasco", "Barueri", "Cotia", "Alphaville", "Outro"]
+                mun_cur = str(st.session_state.get("municipio_destino", "São Paulo"))
+                if mun_cur not in mun_opts:
+                    mun_cur = "São Paulo"
+                municipio_input = st.selectbox("Município unidade (Grande SP)", options=mun_opts, index=mun_opts.index(mun_cur), help="Municipal: SP 25/01, Carapicuíba 26/03, Osasco 19/02, Barueri 11/03 (Alphaville), Cotia 02/04.")
+            c_ano, c_mes = st.columns(2)
+            with c_ano:
+                ano_input = st.number_input("Ano competência", min_value=2020, max_value=2100, value=int(st.session_state.get("ano_ref", datetime.now().year)), step=1)
+            with c_mes:
+                mes_input = st.number_input("Mês competência", min_value=1, max_value=12, value=int(st.session_state.get("mes_ref", datetime.now().month)), step=1)
+            dias_override_input = st.number_input(
+                "Override dias úteis (opcional)",
+                min_value=0, max_value=31, value=0, step=1,
+                help="0 = cálculo automático por escala/feriados. Informe 1-31 para sobrescrever manualmente (auditoria).",
+            )
+            # Preview do cálculo (sem cache — puro)
+            try:
+                _dias_override_preview = int(dias_override_input) if int(dias_override_input) > 0 else None
+                _prev = calcular_dias_uteis(int(ano_input), int(mes_input), escala_input, uf_input, municipio_input, dias_override=_dias_override_preview)
+                if _prev.get("sucesso"):
+                    st.caption(f"📅 Dias úteis calculados: **{int(_prev['dias_uteis'])}** ({int(_prev['dias_brutos'])} brutos - {len(_prev.get('feriados_descontados', []))} feriados) — {escala_input} {int(mes_input):02d}/{int(ano_input)} {uf_input}/{municipio_input}" + (" — override manual" if _prev.get("dias_override_aplicado") else ""))
+                else:
+                    st.caption(f"⚠️ {_prev.get('erro','Falha no calendário')}")
+            except Exception:
+                pass
             c1, c2 = st.columns(2)
             with c1:
-                dias_input = st.number_input("Dias úteis no mês", min_value=1, max_value=31, value=int(st.session_state.dias_uteis), step=1)
+                # mantém compatibilidade: dias_input agora é derivado mas ainda exibido como fallback se calendário falhar
+                dias_input_hidden = st.number_input("Dias úteis (fallback)", min_value=1, max_value=31, value=int(st.session_state.dias_uteis), step=1, help="Usado apenas se calendário falhar. Normalmente use o override acima.")
+                dias_input = dias_input_hidden  # compatibilidade com lógica legada (será sobrescrito pelo calendário após submit)
             with c2:
                 tarifa_input = st.number_input(
                     "Tarifa unitária / Integração (R$)",
@@ -341,11 +399,12 @@ def main():
 
         # Ações de limpeza
         if st.button("🧹 Limpar Simulação", width='stretch'):
-            for k in ["resultado", "resultado_vt", "resultado_vc", "coords", "pdf_buffer", "batch_df", "batch_resultados", "comparativo"]:
+            for k in ["resultado", "resultado_vt", "resultado_vc", "coords", "pdf_buffer", "batch_df", "batch_resultados", "comparativo", "memoria_calendario"]:
                 st.session_state[k] = None
             st.session_state["rota_selecionada"] = "economica"
             st.session_state["ultimo_calculo_em"] = None
             st.session_state["salario_base"] = 0.0
+            st.session_state["dias_override"] = None
             st.rerun()
 
         st.divider()
@@ -473,12 +532,77 @@ def main():
                             csv_buf = io.StringIO()
                             df_res.to_csv(csv_buf, index=False)
                             st.download_button(
-                                "⬇️ Baixar resultado do lote (CSV)",
+                                "⬇️ Baixar resultado do lote (CSV completo)",
                                 data=csv_buf.getvalue().encode("utf-8"),
                                 file_name=f"smartpass_lote_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                                 mime="text/csv",
                                 width='stretch',
                             )
+                            # --- Exportação padronizada para portais de benefícios (BytesIO, LGPD) ---
+                            st.markdown("**Exportação padronizada para portais de benefícios (LGPD — CPF mascarado, BytesIO):**")
+                            layout_lote = st.radio(
+                                "Selecione o layout",
+                                options=["Padrão Compra (SPTrans/TOP)", "Rubrica Folha (eSocial/ERP)"],
+                                index=0,
+                                horizontal=True,
+                                key="layout_lote_radio",
+                            )
+                            # Determina dias úteis para exportação (usa calendário se disponível)
+                            try:
+                                _ov_lote = int(dias_override_input) if int(dias_override_input) > 0 else None
+                                _cal_lote = calcular_dias_uteis(int(ano_input), int(mes_input), escala_input, uf_input, municipio_input, dias_override=_ov_lote)
+                                _dias_export = int(_cal_lote["dias_uteis"]) if _cal_lote.get("sucesso") else int(dias_input_hidden)
+                            except Exception:
+                                _dias_export = int(st.session_state.get("dias_uteis", 22))
+                            comp_export = f"{int(mes_input):02d}/{int(ano_input)}"
+                            # Monta dados para export_formatter a partir do lote
+                            try:
+                                export_rows = []
+                                for idx_row, row_orig in df.iterrows():
+                                    # tenta recuperar custo do resultado correspondente
+                                    res_row = resultados_lote[idx_row] if idx_row < len(resultados_lote) else {}
+                                    nome_exp = str(row_orig.get("nome") or row_orig.get("colaborador") or f"Colaborador {idx_row+1}").strip()
+                                    cpf_exp = str(row_orig.get("cpf") or row_orig.get("documento") or "00000000000").strip()
+                                    mat_exp = str(row_orig.get("matricula") or row_orig.get("mat") or str(idx_row+1).zfill(4)).strip()
+                                    operadora_exp = str(row_orig.get("operadora") or "SPTrans").strip()
+                                    codigo_linha_exp = str(row_orig.get("codigo_linha") or row_orig.get("linha") or "—").strip()
+                                    valor_diario_exp = res_row.get("custo_diario", 0) or 0
+                                    # normaliza valor_diario para float/str
+                                    try:
+                                        valor_diario_exp = float(valor_diario_exp)
+                                    except Exception:
+                                        valor_diario_exp = 0
+                                    salario_exp = row_orig.get("salario_base") or row_orig.get("salario") or None
+                                    export_rows.append({
+                                        "matricula": mat_exp,
+                                        "nome": nome_exp,
+                                        "cpf": cpf_exp,
+                                        "operadora": operadora_exp,
+                                        "codigo_linha": codigo_linha_exp,
+                                        "valor_diario": valor_diario_exp,
+                                        "salario_base": salario_exp,
+                                    })
+                                df_export_src = pd.DataFrame(export_rows)
+                                if layout_lote == "Padrão Compra (SPTrans/TOP)":
+                                    exp_res = gerar_export_compra(df_export_src, dias_uteis=int(_dias_export), competencia=comp_export)
+                                else:
+                                    exp_res = gerar_export_rubrica(df_export_src, dias_uteis=int(_dias_export), competencia=comp_export)
+                                if exp_res.get("sucesso"):
+                                    st.caption(f"Layout **{layout_lote}** — {len(export_rows)} registros, {_dias_export} dias úteis, competência {comp_export}. CPF mascarado, utf-8-sig, BytesIO.")
+                                    for m in exp_res.get("memoria_calculo", [])[:2]:
+                                        st.caption(f"• {m}")
+                                    st.download_button(
+                                        f"⬇️ Baixar {layout_lote} (CSV utf-8-sig, BytesIO)",
+                                        data=exp_res["bytesio"].getvalue(),
+                                        file_name=exp_res["filename"],
+                                        mime="text/csv",
+                                        width='stretch',
+                                        key="download_lote_export",
+                                    )
+                                else:
+                                    st.warning(f"Falha no export {layout_lote}: {exp_res.get('erro','')}")
+                            except Exception as _exc_exp:
+                                st.warning(f"Não foi possível gerar export padronizado: {_exc_exp}")
                         progresso.empty()
                 except Exception as exc:
                     st.error(f"Falha ao ler arquivo: {exc}")
@@ -510,13 +634,31 @@ def main():
             st.toast("Informe origem e destino.", icon="⚠️")
             st.error("Preencha origem e destino para calcular.")
         else:
+            # Calcula dias úteis por escala/município (com override)
+            try:
+                _ov = int(dias_override_input) if int(dias_override_input) > 0 else None
+            except Exception:
+                _ov = None
+            try:
+                _cal = calcular_dias_uteis(int(ano_input), int(mes_input), escala_input, uf_input, municipio_input, dias_override=_ov)
+                if _cal.get("sucesso"):
+                    dias_efetivos = int(_cal["dias_uteis"])
+                    memoria_cal = _cal.get("memoria_calculo", [])
+                else:
+                    dias_efetivos = int(dias_input)
+                    memoria_cal = [f"Calendário falhou ({_cal.get('erro','')}) — fallback {dias_efetivos} dias."]
+                    _cal = {"sucesso": False, "dias_uteis": dias_efetivos, "memoria_calculo": memoria_cal, "justificativa": "Fallback dias úteis."}
+            except Exception as _exc:
+                dias_efetivos = int(dias_input)
+                memoria_cal = [f"Calendário exceção: {_exc} — fallback {dias_efetivos} dias."]
+                _cal = {"sucesso": False, "dias_uteis": dias_efetivos, "memoria_calculo": memoria_cal, "justificativa": "Fallback."}
             with st.spinner("🔎 Geocodificando endereços e roteirizando via OTP/OSRM…"):
                 try:
                     payload, coords, origem_label, destino_label, geos = _processar_calculo(
                         origem_input.strip(),
                         destino_input.strip(),
                         modalidade_input,
-                        int(dias_input),
+                        int(dias_efetivos),
                         float(tarifa_input),
                         float(valor_km_input),
                     )
@@ -533,7 +675,14 @@ def main():
                         st.session_state.origem_label = origem_label
                         st.session_state.destino_label = destino_label
                         st.session_state.modalidade = modalidade_input
-                        st.session_state.dias_uteis = int(dias_input)
+                        st.session_state.dias_uteis = int(dias_efetivos)
+                        st.session_state.escala = str(escala_input)
+                        st.session_state.uf_destino = str(uf_input)
+                        st.session_state.municipio_destino = str(municipio_input)
+                        st.session_state.ano_ref = int(ano_input)
+                        st.session_state.mes_ref = int(mes_input)
+                        st.session_state.dias_override = _ov
+                        st.session_state.memoria_calendario = _cal
                         st.session_state.tarifa = float(tarifa_input)
                         st.session_state.valor_km = float(valor_km_input)
                         st.session_state.salario_base = float(salario_base_input) if salario_base_input is not None else 0.0
@@ -616,6 +765,40 @@ def main():
         m2.metric("⏱️ Tempo de Deslocamento", _format_tempo(tempo_min), help="Estimativa heurística (OTP não expõe duração nesta versão)")
         m3.metric("💰 Custo Diário (Ida + Volta)", f"R$ {float(custo_diario):.2f}" if custo_diario is not None else "—")
         m4.metric(f"🗓️ Custo Mensal ({dias_uteis_atual} dias)", f"R$ {float(custo_mensal):.2f}" if custo_mensal is not None else "—")
+        # Memória calendário — trilha auditável de dias úteis por escala/município
+        _cal_mem = st.session_state.get("memoria_calendario")
+        if _cal_mem and isinstance(_cal_mem, dict):
+            escala_show = _cal_mem.get("escala", st.session_state.get("escala", "5x2"))
+            uf_show = _cal_mem.get("uf", st.session_state.get("uf_destino", "SP"))
+            mun_show = _cal_mem.get("municipio_destino", st.session_state.get("municipio_destino", "—"))
+            st.info(f"📅 **Calendário:** Escala **{escala_show}** • **{uf_show}/{mun_show}** • {int(_cal_mem.get('mes',0)):02d}/{int(_cal_mem.get('ano',0))} • **{int(_cal_mem.get('dias_uteis', dias_uteis_atual))} dias úteis** ({int(_cal_mem.get('dias_brutos',0))} brutos - {len(_cal_mem.get('feriados_descontados',[]))} feriados)" + (" — override manual" if _cal_mem.get("dias_override_aplicado") else ""))
+            with st.expander("📋 Memória de cálculo — dias úteis por escala/município", expanded=False):
+                for linha in _cal_mem.get("memoria_calculo", []):
+                    st.caption(f"• {linha}")
+                st.caption(_cal_mem.get("justificativa",""))
+                if _cal_mem.get("feriados_descontados"):
+                    st.markdown("**Feriados descontados no mês:**")
+                    for f in _cal_mem.get("feriados_descontados", []):
+                        st.caption(f"• {f['data']} — {f['nome']}")
+        # Export individual padronizado (suporte ao fluxo individual)
+        if st.session_state.resultado_vt or st.session_state.resultado_vc:
+            with st.expander("📤 Exportação individual padronizada (BytesIO, LGPD)", expanded=False):
+                _layout_ind = st.radio("Layout", options=["Padrão Compra (SPTrans/TOP)", "Rubrica Folha (eSocial/ERP)"], index=0, horizontal=True, key="layout_individual")
+                try:
+                    _valor_ind = float(st.session_state.resultado_vt.get("custo_diario", 0) if st.session_state.resultado_vt else st.session_state.resultado_vc.get("custo_diario", 0) or 0)
+                    _dados_ind = [{"matricula": "0001", "nome": "Colaborador (simulação)", "cpf": "12345678900", "operadora": "SPTrans", "codigo_linha": "—", "valor_diario": _valor_ind, "salario_base": st.session_state.get("salario_base", 0)}]
+                    _comp_ind = f"{int(st.session_state.get('mes_ref', datetime.now().month)):02d}/{int(st.session_state.get('ano_ref', datetime.now().year))}"
+                    if _layout_ind == "Padrão Compra (SPTrans/TOP)":
+                        _exp_ind = gerar_export_compra(_dados_ind, dias_uteis=int(dias_uteis_atual), competencia=_comp_ind)
+                    else:
+                        _exp_ind = gerar_export_rubrica(_dados_ind, dias_uteis=int(dias_uteis_atual), competencia=_comp_ind)
+                    if _exp_ind.get("sucesso"):
+                        st.caption(f"{_exp_ind.get('justificativa','')}")
+                        st.download_button("⬇️ Baixar export individual (CSV utf-8-sig)", data=_exp_ind["bytesio"].getvalue(), file_name=_exp_ind["filename"], mime="text/csv", width='stretch', key="download_individual_export")
+                    else:
+                        st.warning(_exp_ind.get("erro","Falha no export individual"))
+                except Exception as _e:
+                    st.warning(f"Export individual indisponível: {_e}")
 
         # Aviso de fallback se houver
         if resultado.get("aviso"):
