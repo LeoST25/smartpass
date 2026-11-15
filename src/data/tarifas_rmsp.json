@@ -1,0 +1,146 @@
+{
+  "versao": "2025-01-06",
+  "vigencia_inicio": "2025-01-06",
+  "fonte": "SPTrans / EMTU / CPTM / Metrô / ViaQuatro / ViaMobilidade — Tarifas oficiais vigentes RMSP (Jan/2025)",
+  "observacao": "Valores oficiais. Integração Bilhete Único: até 4 ônibus SPTrans em 3h = 1 tarifa. Integração ônibus+trilho = teto. TOP/EMTU+trilho = desconto.",
+  "sptrans": {
+    "tarifa": 4.40,
+    "integracao_trilho_teto": 9.20,
+    "regra": "Até 4 embarques em ônibus municipais SP em 3h pagam 1 tarifa cheia"
+  },
+  "trilhos": {
+    "tarifa_unificada": 5.00,
+    "operadoras": ["Metrô", "CPTM", "ViaQuatro", "ViaMobilidade"],
+    "integracao_trilho_trilho": "Tarifa única por sentido quando integração gratuita entre linhas"
+  },
+  "emtu": {
+    "tarifa_base": 6.80,
+    "desconto_top_trilho": 0.50
+  },
+  "agencias": {
+    "sptrans": {
+      "match": ["sptrans", "sp trans", "sao paulo transporte"],
+      "tarifa": 4.40,
+      "tipo": "SPTRANS_ONIBUS",
+      "operadora": "SPTrans"
+    },
+    "emtu": {
+      "match": ["emtu", "intermunicipal", "top"],
+      "tarifa": 6.80,
+      "tipo": "EMTU",
+      "operadora": "EMTU"
+    },
+    "metro": {
+      "match": ["metro", "metrô", "viaquatro"],
+      "tarifa": 5.00,
+      "tipo": "TRILHO",
+      "operadora": "Metrô / ViaQuatro"
+    },
+    "cptm": {
+      "match": ["cptm", "viamobilidade", "trem"],
+      "tarifa": 5.00,
+      "tipo": "TRILHO",
+      "operadora": "CPTM / ViaMobilidade"
+    },
+    "benfica_bbtt": {
+      "match": ["benfica", "bbtt"],
+      "tarifa": 5.00,
+      "tipo": "SPTRANS_ONIBUS",
+      "operadora": "Benfica BBTT (Barueri/Jandira)"
+    },
+    "viacao_osasco": {
+      "match": ["viacao osasco", "viação osasco"],
+      "tarifa": 5.00,
+      "tipo": "SPTRANS_ONIBUS",
+      "operadora": "Viação Osasco"
+    },
+    "delrey_ettc": {
+      "match": ["del rey", "ettc", "carapicuiba"],
+      "tarifa": 4.90,
+      "tipo": "SPTRANS_ONIBUS",
+      "operadora": "Del Rey / ETTC (Carapicuíba)"
+    }
+  },
+  "linhas": {
+    "242": {
+      "operadora": "EMTU - Internorte (Carapicuíba/Osasco)",
+      "tarifa": 6.80,
+      "tipo": "EMTU",
+      "municipios": ["Carapicuíba", "Osasco", "São Paulo"]
+    },
+    "241": {
+      "operadora": "EMTU - Internorte",
+      "tarifa": 6.10,
+      "tipo": "EMTU",
+      "municipios": ["Carapicuíba", "Barueri"]
+    },
+    "392": {
+      "operadora": "EMTU - Internorte",
+      "tarifa": 5.85,
+      "tipo": "EMTU",
+      "municipios": ["Carapicuíba"]
+    },
+    "175": {
+      "operadora": "SPTrans",
+      "tarifa": 4.40,
+      "tipo": "SPTRANS_ONIBUS",
+      "municipios": ["São Paulo"]
+    },
+    "860": {
+      "operadora": "SPTrans",
+      "tarifa": 4.40,
+      "tipo": "SPTRANS_ONIBUS",
+      "municipios": ["São Paulo"]
+    },
+    "8-Diamante": {
+      "operadora": "ViaMobilidade - CPTM L8",
+      "tarifa": 5.00,
+      "tipo": "TRILHO",
+      "municipios": ["Carapicuíba", "Osasco", "São Paulo"]
+    },
+    "9-Esmeralda": {
+      "operadora": "ViaMobilidade - CPTM L9",
+      "tarifa": 5.00,
+      "tipo": "TRILHO",
+      "municipios": ["São Paulo"]
+    },
+    "L4-Amarela": {
+      "operadora": "ViaQuatro - Metrô L4",
+      "tarifa": 5.00,
+      "tipo": "TRILHO",
+      "municipios": ["São Paulo"]
+    }
+  },
+  "municipais": {
+    "osasco": {
+      "operadora": "Viação Osasco",
+      "tarifa": 5.00,
+      "cidade": "Osasco"
+    },
+    "barueri": {
+      "operadora": "Benfica BBTT",
+      "tarifa": 5.00,
+      "cidade": "Barueri"
+    },
+    "carapicuiba": {
+      "operadora": "Del Rey / ETTC",
+      "tarifa": 4.90,
+      "cidade": "Carapicuíba"
+    },
+    "cotia": {
+      "operadora": "Viação Cotia",
+      "tarifa": 5.20,
+      "cidade": "Cotia"
+    },
+    "taboao": {
+      "operadora": "Viação Taboão",
+      "tarifa": 5.10,
+      "cidade": "Taboão da Serra"
+    },
+    "guarulhos": {
+      "operadora": "Guarupass",
+      "tarifa": 5.30,
+      "cidade": "Guarulhos"
+    }
+  }
+}

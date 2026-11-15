@@ -7,6 +7,36 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from src.services.map_generator import gerar_imagem_mapa_rota
 
+
+def _rota_para_mapa_pdf(dados_calculo: dict) -> dict | None:
+    """Extrai as pernas da rota para desenhar o traçado real no mapa do PDF.
+
+    Procura as ``legs`` no contrato principal e, na ausência, nas rotas do
+    comparativo (mais rápida / mais econômica).
+
+    Args:
+        dados_calculo: Dicionário com os dados do cálculo (inclui ``legs`` e
+            ``comparativo`` quando disponíveis).
+
+    Returns:
+        dict | None: Dicionário com ``legs`` para o mapa, ou ``None`` quando
+        não há geometria disponível (o mapa usará o traçado fallback).
+    """
+    if not isinstance(dados_calculo, dict):
+        return None
+
+    legs = dados_calculo.get("legs")
+    if legs:
+        return {"legs": legs}
+
+    comparativo = dados_calculo.get("comparativo")
+    if isinstance(comparativo, dict):
+        for chave in ("rota_mais_economica", "rota_mais_rapida"):
+            rota = comparativo.get(chave)
+            if isinstance(rota, dict) and rota.get("legs"):
+                return {"legs": rota["legs"]}
+    return None
+
 def gerar_pdf_evidencia(dados_candidato, tipo_beneficio, dados_calculo, coords=None):
     """
     Gera um relatório em PDF contendo o resumo do benefício e a evidência cartográfica do trajeto.
@@ -133,11 +163,11 @@ def gerar_pdf_evidencia(dados_candidato, tipo_beneficio, dados_calculo, coords=N
         ]))
         story.append(tabela_resumo)
     else:
-        # Vale-Transporte
-        lin_headers = ["Linha / Modal", "Tarifa Un.", "Qtd/Dia", "Subtotal Diário"]
+        # Vale-Transporte — tabela enriquecida com operadora/fonte/confirmada
+        lin_headers = ["Linha / Modal", "Operadora", "Código", "Tarifa Un.", "Fonte", "Status"]
         tabela_vt_data = [
-            ["Endereço Origem", dados_calculo.get('origem', 'N/A'), "", ""],
-            ["Endereço Destino", dados_calculo.get('destino', 'N/A'), "", ""],
+            ["Endereço Origem", dados_calculo.get('origem', 'N/A'), "", "", "", ""],
+            ["Endereço Destino", dados_calculo.get('destino', 'N/A'), "", "", "", ""],
             lin_headers
         ]
 
@@ -148,29 +178,42 @@ def gerar_pdf_evidencia(dados_candidato, tipo_beneficio, dados_calculo, coords=N
             story.append(Spacer(1, 6))
         
         for det in dados_calculo.get('detalhes', []):
+            status = "✅ Confirmada" if det.get("tarifa_confirmada") else "⚠️ Estimativa"
+            fonte_curta = (det.get("fonte") or "—")[:32]
             tabela_vt_data.append([
-                det.get('linha', 'N/A'),
+                Paragraph(escape(str(det.get('linha', 'N/A'))), styles['Normal']),
+                Paragraph(escape(str(det.get('operadora', '—'))), styles['Normal']),
+                Paragraph(escape(str(det.get('codigo_linha', '—'))), styles['Normal']),
                 f"R$ {det.get('valor_unitario', 0):.2f}",
-                str(det.get('quantidade_dia', 2)),
-                f"R$ {det.get('subtotal', 0):.2f}"
+                Paragraph(escape(fonte_curta), styles['Normal']),
+                status,
             ])
             
-        tabela_vt_data.append(["TOTAL DIÁRIO", "", "", f"R$ {dados_calculo.get('custo_diario', 0):.2f}"])
-        tabela_vt_data.append(["ESTIMATIVA MENSAL (22 dias)", "", "", f"R$ {dados_calculo.get('custo_mensal', 0):.2f}"])
+        dias_label = dados_calculo.get("dias_uteis") or 22
+        tabela_vt_data.append(["TOTAL DIÁRIO (ida+volta)", "", "", f"R$ {dados_calculo.get('custo_diario', 0):.2f}", "", ""])
+        tabela_vt_data.append([f"ESTIMATIVA MENSAL ({dias_label} dias)", "", "", f"R$ {dados_calculo.get('custo_mensal', 0):.2f}", "", ""])
 
-        tabela_vt = Table(tabela_vt_data, colWidths=[220, 100, 80, 140])
+        tabela_vt = Table(tabela_vt_data, colWidths=[150, 90, 55, 65, 110, 70], repeatRows=3)
         tabela_vt.setStyle(TableStyle([
-            ('SPAN', (1,0), (3,0)),
-            ('SPAN', (1,1), (3,1)),
+            ('SPAN', (1,0), (-1,0)),
+            ('SPAN', (1,1), (-1,1)),
             ('BACKGROUND', (0,2), (-1,2), colors.HexColor('#1E3A8A')),
             ('TEXTCOLOR', (0,2), (-1,2), colors.whitesmoke),
             ('FONTNAME', (0,2), (-1,2), 'Helvetica-Bold'),
             ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E1')),
             ('BACKGROUND', (0,-2), (-1,-1), colors.HexColor('#F1F5F9')),
             ('FONTNAME', (0,-2), (-1,-1), 'Helvetica-Bold'),
-            ('PADDING', (0,0), (-1,-1), 5),
+            ('PADDING', (0,0), (-1,-1), 4),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('FONTSIZE', (0,0), (-1,-1), 7),
         ]))
         story.append(tabela_vt)
+        # alerta de tarifas não confirmadas
+        pend = [d for d in dados_calculo.get('detalhes', []) if not d.get("tarifa_confirmada")]
+        if pend:
+            story.append(Spacer(1, 6))
+            story.append(Paragraph(f"<b>⚠️ Atenção:</b> {len(pend)} linha(s) com tarifa estimada — confirmar valor oficial junto à operadora/ARTESP: " + ", ".join([escape(f"{d.get('codigo_linha') or d.get('linha')} ({d.get('operadora')})") for d in pend]), styles['Normal']))
+            story.append(Spacer(1, 4))
 
     story.append(Spacer(1, 8))
 
@@ -241,7 +284,13 @@ def gerar_pdf_evidencia(dados_candidato, tipo_beneficio, dados_calculo, coords=N
     
     if coords and len(coords) == 4:
         lat_o, lon_o, lat_d, lon_d = coords
-        img_buffer = gerar_imagem_mapa_rota(lat_o, lon_o, lat_d, lon_d)
+        # Usa a geometria real por trecho quando disponível (OTP) para desenhar
+        # o traçado destacado sobre os tiles urbanos; caso contrário, cai no
+        # traçado rodoviário/linha reta com fallback offline.
+        rota_para_mapa = _rota_para_mapa_pdf(dados_calculo)
+        img_buffer = gerar_imagem_mapa_rota(
+            lat_o, lon_o, lat_d, lon_d, rota_dados=rota_para_mapa
+        )
         story.append(Image(img_buffer, width=540, height=270))
     else:
         story.append(Paragraph("<i>Evidência cartográfica indisponível para esta consulta.</i>", styles['Normal']))

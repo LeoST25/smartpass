@@ -40,7 +40,7 @@ def calcular_vale_combustivel(origem_lat, origem_lon, destino_lat, destino_lon, 
 def roteirizar_vale_transporte_automatico(
     origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem="Origem não informada", endereco_destino="Destino não informado"
 ):
-    """Usa OpenTripPlanner como motor principal de VT e estimativa em contingência."""
+    """Usa OpenTripPlanner como motor principal de VT com tarifa oficial por linha; fallback contingência."""
     distancia_fallback = _distancia_rodoviaria_km(origem_lat, origem_lon, destino_lat, destino_lon)
     resposta = consultar_linhas_transporte_oficial(
         origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem, endereco_destino
@@ -51,18 +51,85 @@ def roteirizar_vale_transporte_automatico(
         itinerario = estimar_itinerario_fallback(distancia_fallback)
         itinerario["fonte"] = resposta.get("fonte", "Estimativa de contingência")
         itinerario["aviso"] = resposta.get("erro", "Serviço de roteirização indisponível.")
+        # Leg sintética com os extremos reais: permite ao mapa cartográfico
+        # desenhar o traçado (via OSRM) mesmo sem itinerário oficial do OTP.
+        itinerario["legs"] = [
+            {
+                "linha": item.get("linha", "Transporte público"),
+                "mode": "BUS",
+                "route": {"shortName": item.get("linha", "Estimativa")},
+                "distance": 1000,
+                "from": {
+                    "name": endereco_origem,
+                    "lat": float(origem_lat),
+                    "lon": float(origem_lon),
+                },
+                "to": {
+                    "name": endereco_destino,
+                    "lat": float(destino_lat),
+                    "lon": float(destino_lon),
+                },
+                "pontos": [],
+                "geometria_fallback": True,
+            }
+            for item in itinerario.get("linhas", [])
+        ]
+        itinerario["legs_transito"] = itinerario["legs"]
 
-    resultado = calcular_vale_transporte(itinerario["linhas"])
-    resultado.update(
-        {
-            "sucesso": True,
-            "distancia_km": itinerario["distancia_km"],
-            "resumo_trajeto": itinerario["resumo_trajeto"],
-            "fonte": itinerario["fonte"],
-        }
-    )
+    # Tenta motor oficial com integração BU/TOP quando legs enriquecidos existem
+    legs = itinerario.get("legs_transito") or itinerario.get("legs") or []
+    resultado = None
+    if legs:
+        try:
+            from src.services.fare_engine import calcular_custo_com_integracao
+
+            res_oficial = calcular_custo_com_integracao(legs, dias_uteis=22)
+            if res_oficial.get("sucesso"):
+                resultado = {
+                    "sucesso": True,
+                    "custo_diario": res_oficial["custo_diario"],
+                    "custo_mensal": res_oficial["custo_mensal"],
+                    "custo_trecho": res_oficial["custo_trecho"],
+                    "detalhes": res_oficial["detalhes"],
+                    "detalhamento_tarifario": res_oficial["detalhamento_tarifario"],
+                    "memoria_calculo": res_oficial["memoria_calculo"],
+                    "justificativa": res_oficial["justificativa"],
+                    "alertas_tarifa": res_oficial.get("alertas_tarifa", []),
+                    "catalogo_versao": res_oficial.get("catalogo_versao"),
+                }
+        except Exception:
+            resultado = None
+    if resultado is None:
+        # fallback compatível (soma simples)
+        resultado = calcular_vale_transporte(itinerario["linhas"])
+        resultado.update(
+            {
+                "sucesso": True,
+                "distancia_km": itinerario["distancia_km"],
+                "resumo_trajeto": itinerario["resumo_trajeto"],
+                "fonte": itinerario["fonte"],
+                "linhas": itinerario.get("linhas", []),
+                "legs": itinerario.get("legs", []),
+                "legs_transito": itinerario.get("legs_transito", []),
+            }
+        )
+    else:
+        # completa campos de roteirização
+        resultado.update(
+            {
+                "sucesso": True,
+                "distancia_km": itinerario["distancia_km"],
+                "resumo_trajeto": itinerario["resumo_trajeto"],
+                "fonte": itinerario["fonte"],
+                "linhas": itinerario.get("linhas", []),
+                "legs": itinerario.get("legs", []),
+                "legs_transito": itinerario.get("legs_transito", []),
+            }
+        )
     if "aviso" in itinerario:
         resultado["aviso"] = itinerario["aviso"]
+    if "fare_cents" in itinerario:
+        resultado["fare_cents"] = itinerario["fare_cents"]
     return resultado
 
 
@@ -145,8 +212,30 @@ def roteirizar_com_comparativo(
         try:
             from src.services.fare_engine import calcular_custo_com_integracao
 
-            # converte fallback linhas em legs sintéticos para fare_engine
-            legs_fb = [{"linha": l["linha"], "mode": "BUS", "route": {"shortName": l["linha"]}, "distance": 1000} for l in itinerario["linhas"]]
+            # converte fallback linhas em legs sintéticos para fare_engine.
+            # Inclui from/to com as coordenadas reais para que o mapa cartográfico
+            # consiga desenhar o traçado (via OSRM) mesmo em contingência.
+            legs_fb = [
+                {
+                    "linha": l["linha"],
+                    "mode": "BUS",
+                    "route": {"shortName": l["linha"]},
+                    "distance": 1000,
+                    "from": {
+                        "name": "Origem",
+                        "lat": float(origem_lat),
+                        "lon": float(origem_lon),
+                    },
+                    "to": {
+                        "name": "Destino",
+                        "lat": float(destino_lat),
+                        "lon": float(destino_lon),
+                    },
+                    "pontos": [],
+                    "geometria_fallback": True,
+                }
+                for l in itinerario["linhas"]
+            ]
             custo_fb = calcular_custo_com_integracao(legs_fb, dias_uteis=dias_uteis, config=config)
             comparativo_fb = {
                 "sucesso": True,
