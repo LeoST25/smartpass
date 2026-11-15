@@ -19,7 +19,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
-import streamlit as st
+
+from src.services.cache import st_cache_data
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -352,7 +353,7 @@ def _extrair_todos_itinerarios_otp(payload):
     return itinerarios
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st_cache_data(ttl=600, show_spinner=False)
 def resolver_itinerario_com_otp(origem_lat, origem_lon, destino_lat, destino_lon):
     """Obtém itinerários reais dos feeds GTFS carregados no OTP local. Cache 10min."""
     response = requests.post(
@@ -364,7 +365,7 @@ def resolver_itinerario_com_otp(origem_lat, origem_lon, destino_lat, destino_lon
     return _extrair_itinerario_otp(response.json())
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st_cache_data(ttl=600, show_spinner=False)
 def resolver_todos_itinerarios_com_otp(origem_lat, origem_lon, destino_lat, destino_lon):
     """Obtém até 3 itinerários OTP para comparativo econômica vs rápida. Cache 10min."""
     response = requests.post(
