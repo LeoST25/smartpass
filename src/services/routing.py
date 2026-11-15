@@ -51,6 +51,30 @@ def roteirizar_vale_transporte_automatico(
         itinerario = estimar_itinerario_fallback(distancia_fallback)
         itinerario["fonte"] = resposta.get("fonte", "Estimativa de contingência")
         itinerario["aviso"] = resposta.get("erro", "Serviço de roteirização indisponível.")
+        # Leg sintética com os extremos reais: permite ao mapa cartográfico
+        # desenhar o traçado (via OSRM) mesmo sem itinerário oficial do OTP.
+        itinerario["legs"] = [
+            {
+                "linha": item.get("linha", "Transporte público"),
+                "mode": "BUS",
+                "route": {"shortName": item.get("linha", "Estimativa")},
+                "distance": 1000,
+                "from": {
+                    "name": endereco_origem,
+                    "lat": float(origem_lat),
+                    "lon": float(origem_lon),
+                },
+                "to": {
+                    "name": endereco_destino,
+                    "lat": float(destino_lat),
+                    "lon": float(destino_lon),
+                },
+                "pontos": [],
+                "geometria_fallback": True,
+            }
+            for item in itinerario.get("linhas", [])
+        ]
+        itinerario["legs_transito"] = itinerario["legs"]
 
     # Tenta motor oficial com integração BU/TOP quando legs enriquecidos existem
     legs = itinerario.get("legs_transito") or itinerario.get("legs") or []
@@ -84,6 +108,9 @@ def roteirizar_vale_transporte_automatico(
                 "distancia_km": itinerario["distancia_km"],
                 "resumo_trajeto": itinerario["resumo_trajeto"],
                 "fonte": itinerario["fonte"],
+                "linhas": itinerario.get("linhas", []),
+                "legs": itinerario.get("legs", []),
+                "legs_transito": itinerario.get("legs_transito", []),
             }
         )
     else:
@@ -185,8 +212,30 @@ def roteirizar_com_comparativo(
         try:
             from src.services.fare_engine import calcular_custo_com_integracao
 
-            # converte fallback linhas em legs sintéticos para fare_engine
-            legs_fb = [{"linha": l["linha"], "mode": "BUS", "route": {"shortName": l["linha"]}, "distance": 1000} for l in itinerario["linhas"]]
+            # converte fallback linhas em legs sintéticos para fare_engine.
+            # Inclui from/to com as coordenadas reais para que o mapa cartográfico
+            # consiga desenhar o traçado (via OSRM) mesmo em contingência.
+            legs_fb = [
+                {
+                    "linha": l["linha"],
+                    "mode": "BUS",
+                    "route": {"shortName": l["linha"]},
+                    "distance": 1000,
+                    "from": {
+                        "name": "Origem",
+                        "lat": float(origem_lat),
+                        "lon": float(origem_lon),
+                    },
+                    "to": {
+                        "name": "Destino",
+                        "lat": float(destino_lat),
+                        "lon": float(destino_lon),
+                    },
+                    "pontos": [],
+                    "geometria_fallback": True,
+                }
+                for l in itinerario["linhas"]
+            ]
             custo_fb = calcular_custo_com_integracao(legs_fb, dias_uteis=dias_uteis, config=config)
             comparativo_fb = {
                 "sucesso": True,

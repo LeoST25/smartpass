@@ -1,9 +1,13 @@
 streamlit==1.66.1
 streamlit-searchbox==0.1.19
+streamlit-folium==0.22.0
+folium==0.16.0
+staticmap==0.5.7
 python-dotenv==1.2.4
 requests==2.34.2
 pytest==9.2.0
 reportlab==5.1.0
 matplotlib==3.11.2
+Pillow==13.0.0
 psycopg2-binary==2.9.13
 PyYAML==6.0.2

@@ -1,7 +1,9 @@
 """Roteamento de transporte público via OpenTripPlanner (OTP).
 
 Extração rica por leg: mode, distance, duration, from{ name lat lon }, to{ name lat lon },
-route{ gtfsId shortName longName agency{ gtfsId name } }.
+route{ gtfsId shortName longName agency{ gtfsId name } } e legGeometry{ points }.
+A geometria decodificada (Google Encoded Polyline) é exposta em ``leg["pontos"]``
+como lista de tuplas ``(lat, lon)`` para renderização cartográfica por modal.
 A tarifa NÃO é consultada no OTP: o campo ``fare`` do schema GraphQL 2.x é opcional
 e, quando ausente no grafo, aborta a query com ``Field 'fare' in type 'Itinerary'
 is undefined``. O cálculo tarifário é responsabilidade exclusiva do ``fare_engine``.
@@ -27,6 +29,84 @@ logger = logging.getLogger(__name__)
 OTP_GRAPHQL_URL = os.getenv("OTP_GRAPHQL_URL", "http://localhost:8080/otp/gtfs/v1")
 VT_TARIFA_PADRAO = float(os.getenv("VT_TARIFA_PADRAO", "5.00"))
 TIMEZONE_RMSP = ZoneInfo("America/Sao_Paulo")
+
+# Bounding box da RMSP (gis-routing-otp/SKILL.md) usado para descartar
+# geometria fora da área coberta pelos feeds GTFS locais.
+RMSN_LAT_MIN, RMSP_LAT_MAX = -24.1, -23.1
+RMSP_LON_MIN, RMSP_LON_MAX = -47.2, -45.7
+
+
+def _coordenada_na_rmsp(lat: float, lon: float) -> bool:
+    """Indica se uma coordenada (WGS84) está dentro do bbox da RMSP.
+
+    Args:
+        lat: Latitude decimal.
+        lon: Longitude decimal.
+
+    Returns:
+        bool: ``True`` quando latitude e longitude estão dentro dos limites.
+    """
+    try:
+        return (
+            RMSN_LAT_MIN <= float(lat) <= RMSP_LAT_MAX
+            and RMSP_LON_MIN <= float(lon) <= RMSP_LON_MAX
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def decodificar_polyline(polyline: str | None) -> list[tuple[float, float]]:
+    """Decodifica uma Google Encoded Polyline em coordenadas (lat, lon).
+
+    Implementação pura (sem dependências externas) do algoritmo oficial: a string
+    é lida em blocos de 5 caracteres, cada bloco representa um valor inteiro
+    com deslocamento de 5 bits e sinal em zigzag; latitude e longitude são
+    acumuladas incrementalmente.
+
+    Args:
+        polyline: String codificada no formato Google Encoded Polyline.
+            ``None`` ou string vazia retornam lista vazia.
+
+    Returns:
+        list[tuple[float, float]]: Lista de pontos ``(lat, lon)`` na ordem do
+        traçado. Lista vazia quando não há pontos decodificáveis.
+
+    Raises:
+        ValueError: Se a string contiver caracteres fora do alfabeto válido
+            (``ASCII 63..126``), indicando payload corrompido.
+    """
+    if not polyline:
+        return []
+
+    pontos: list[tuple[float, float]] = []
+    lat = 0.0
+    lon = 0.0
+    indice = 0
+    tamanho = len(polyline)
+
+    while indice < tamanho:
+        valores: list[int] = []
+        for _ in range(2):  # latitude e longitude, nesta ordem
+            resultado = 0
+            deslocamento = 0
+            while True:
+                if indice >= tamanho:
+                    raise ValueError("Polyline truncada: bloco incompleto.")
+                byte = ord(polyline[indice]) - 63
+                indice += 1
+                if byte < 0 or byte > 63:
+                    raise ValueError(f"Polyline inválida: byte {byte} fora do intervalo.")
+                resultado |= (byte & 0x1F) << deslocamento
+                deslocamento += 5
+                if byte < 0x20:
+                    break
+            valores.append(~(resultado >> 1) if resultado & 1 else (resultado >> 1))
+
+        lat += valores[0] / 100000.0
+        lon += valores[1] / 100000.0
+        pontos.append((lat, lon))
+
+    return pontos
 
 
 def _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon):
@@ -59,6 +139,7 @@ def _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon):
               from {{ name lat lon }}
               to {{ name lat lon }}
               route {{ gtfsId shortName longName agency {{ gtfsId name }} }}
+              legGeometry {{ points }}
             }}
           }}
         }}
@@ -101,7 +182,18 @@ def _agencia_leg(leg: dict) -> dict:
 
 
 def _enriquecer_leg(leg: dict) -> dict:
-    """Enriquece leg com campos canônicos para fare_engine (não muta original)."""
+    """Enriquece leg com campos canônicos para fare_engine e mapa (não muta original).
+
+    Adiciona ``agency``, ``codigo_linha``, normaliza ``from``/``to`` para float e
+    decodifica ``legGeometry.points`` em ``pontos`` (lista de ``(lat, lon)``).
+
+    Args:
+        leg: Leg crua devolvida pelo OTP GraphQL.
+
+    Returns:
+        dict: Cópia enriquecida da leg. ``pontos`` fica vazio e
+        ``geometria_fallback`` ``True`` quando não há polyline utilizável.
+    """
     enriched = dict(leg)
     agencia = _agencia_leg(leg)
     enriched["agency"] = agencia
@@ -118,6 +210,30 @@ def _enriquecer_leg(leg: dict) -> dict:
                     except Exception:
                         pass
     # fare por leg não existe no OTP 2.x sem grafo tarifário — cálculo fica no fare_engine
+
+    # Geometria real da perna: decodifica a polyline do OTP e descarta pontos
+    # fora do bbox da RMSP (garantindo traçado auditável na área atendida).
+    geometry = leg.get("legGeometry") or {}
+    encoded = geometry.get("points") if isinstance(geometry, dict) else None
+    pontos: list[tuple[float, float]] = []
+    descartados = 0
+    if encoded:
+        try:
+            decodificados = decodificar_polyline(encoded)
+        except ValueError:
+            logger.warning("OTP retornou legGeometry inválida; usando fallback de geometria.")
+            decodificados = []
+        for lat, lon in decodificados:
+            if _coordenada_na_rmsp(lat, lon):
+                pontos.append((lat, lon))
+            else:
+                descartados += 1
+        if descartados:
+            logger.warning(
+                "Descartados %d ponto(s) de legGeometry fora do bbox da RMSP.", descartados
+            )
+    enriched["pontos"] = pontos
+    enriched["geometria_fallback"] = not pontos
     return enriched
 
 
@@ -148,6 +264,7 @@ def _extrair_itinerario_otp(payload):
         "caminhada_km": primeiro["caminhada_km"],
         "baldeacoes": primeiro["baldeacoes"],
         "duracao_min": primeiro["duracao_min"],
+        "geometria_fallback": primeiro.get("geometria_fallback", True),
     }
 
 
@@ -226,6 +343,7 @@ def _extrair_todos_itinerarios_otp(payload):
                 "duracao_min": duracao_min,
                 "duracao_total_min": duracao_min,
                 "resumo_trajeto": resumo,
+                "geometria_fallback": all(leg.get("geometria_fallback", True) for leg in legs),
             }
         )
 
