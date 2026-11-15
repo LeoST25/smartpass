@@ -1,14 +1,11 @@
 import io
 import os
 import sys
-import time
-import traceback
 from datetime import datetime
 
 # Garante que `src` seja importável quando executado via `streamlit run src/app.py`
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import requests
 import streamlit as st
 import pandas as pd
 
@@ -88,7 +85,7 @@ def _init_session():
         "destino_numero": "",
         "modalidade": "Vale-Transporte",
         "dias_uteis": 22,
-        "tarifa": 5.00,
+        "tarifa": 0.0,
         "valor_km": 1.25,
         "salario_base": 0.0,
         "pdf_buffer": None,
@@ -104,6 +101,7 @@ def _init_session():
         "mes_ref": now.month,
         "dias_override": None,
         "memoria_calendario": None,
+        "geo_auditoria": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -206,13 +204,16 @@ def _render_endereco_autocomplete(chave: str, label: str, default: str) -> str:
         preview = refinado[0] if refinado else estado
 
     if preview:
-        st.caption(
-            f"{preview.get('semaforo', '')} **{preview.get('nivel_precisao', '')}** · "
-            f"fonte `{preview.get('fonte', '—')}` · {preview.get('label_exibicao', '')}"
-        )
-        st.caption(f"_{preview.get('motivo_precisao', '')}_")
-    else:
-        st.caption("🔎 Digite ao menos 3 caracteres e selecione uma sugestão para ver a precisão.")
+        rotulo_precisao = {
+            "ALTA": "Endereço exato",
+            "MEDIA": "Endereço aproximado",
+            "BAIXA": "Localização aproximada",
+        }.get(str(preview.get("nivel_precisao", "")).upper(), "")
+        linha_endereco = f"{preview.get('semaforo', '')} {preview.get('label_exibicao', '')}".strip()
+        if rotulo_precisao:
+            icone = str(preview.get("semaforo", "")).split(" ")[0].strip()
+            linha_endereco = f"{icone} {preview.get('label_exibicao', '')}".strip() + f" · {rotulo_precisao}"
+        st.caption(linha_endereco)
 
     return texto_final
 
@@ -240,54 +241,18 @@ def _format_tempo(minutos: int) -> str:
     return f"{h}h {m}min"
 
 
-def _verificar_postgres():
-    """Checa se PostgreSQL/PostGIS está online."""
-    try:
-        from src.database.connection import get_db_connection
-
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT 1;")
-        cur.fetchone()
-        # Tenta verificar PostGIS
-        postgis_ok = False
-        postgis_ver = None
-        try:
-            cur.execute("SELECT PostGIS_Version();")
-            row = cur.fetchone()
-            if row:
-                postgis_ver = row[0]
-                postgis_ok = True
-        except Exception:
-            postgis_ok = False
-        cur.close()
-        return {"sucesso": True, "postgis": postgis_ok, "versao": postgis_ver}
-    except Exception as exc:
-        return {"sucesso": False, "erro": str(exc), "postgis": False, "versao": None}
-
-
-def _verificar_otp():
-    """Checa se OTP GraphQL está online."""
-    url = os.getenv("OTP_GRAPHQL_URL", "http://localhost:8080/otp/gtfs/v1")
-    try:
-        # Introspection mínima — qualquer 200 indica serviço ativo
-        resp = requests.post(
-            url,
-            json={"query": "{ __typename }"},
-            timeout=5,
+def _df_lote_para_exibicao(df: pd.DataFrame) -> pd.DataFrame:
+    """Traduz colunas técnicas do lote para rótulos de negócio (exibição apenas)."""
+    exibicao = df.copy()
+    if "fonte" in exibicao.columns:
+        exibicao["fonte"] = exibicao["fonte"].map(
+            lambda valor: "Rota oficial" if str(valor).startswith("OpenTripPlanner") else "Estimativa"
         )
-        if resp.status_code == 200:
-            # Se retornou JSON com data, está online
-            try:
-                js = resp.json()
-                if "data" in js or "errors" in js:
-                    return {"sucesso": True, "url": url, "status": resp.status_code}
-                return {"sucesso": True, "url": url, "status": resp.status_code}
-            except Exception:
-                return {"sucesso": True, "url": url, "status": resp.status_code}
-        return {"sucesso": False, "url": url, "status": resp.status_code, "erro": f"HTTP {resp.status_code}"}
-    except Exception as exc:
-        return {"sucesso": False, "url": url, "erro": str(exc)}
+    if "nivel_precisao" in exibicao.columns:
+        exibicao["nivel_precisao"] = exibicao["nivel_precisao"].map(
+            {"ALTA": "Exato", "MEDIA": "Aproximado", "BAIXA": "Para revisão"}
+        ).fillna(exibicao["nivel_precisao"])
+    return exibicao
 
 
 def _recalcular_vt_com_parametros(resultado_vt: dict, tarifa: float | None, dias_uteis: int) -> dict:
@@ -331,9 +296,9 @@ def _processar_calculo(origem_txt, destino_txt, modalidade, dias_uteis, tarifa_o
 
     # Validação
     if not res_geo_origem.get("sucesso"):
-        return {"sucesso": False, "erro": f"Origem não localizada: {res_geo_origem.get('erro')}"}, None, None, None, None
+        return {"sucesso": False, "erro": "Não foi possível localizar o endereço de origem. Revise o CEP ou o endereço informado."}, None, None, None, None
     if not res_geo_destino.get("sucesso"):
-        return {"sucesso": False, "erro": f"Destino não localizado: {res_geo_destino.get('erro')}"}, None, None, None, None
+        return {"sucesso": False, "erro": "Não foi possível localizar o endereço de destino. Revise o CEP ou o endereço informado."}, None, None, None, None
 
     lat_o, lon_o = res_geo_origem["lat"], res_geo_origem["lon"]
     lat_d, lon_d = res_geo_destino["lat"], res_geo_destino["lon"]
@@ -410,12 +375,12 @@ def main():
     _inject_css()
     _init_session()
 
-    # Header moderno
+    # Header
     st.markdown(
         """
         <div class="smartpass-header">
-            <h1>🚌 SmartPass — Cálculo Inteligente de Benefícios</h1>
-            <p>Roteirização com OpenTripPlanner (GTFS) + PostGIS &nbsp;•&nbsp; Stateless & LGPD — dados apenas em memória</p>
+            <h1>🚌 SmartPass — Gestão Inteligente de Vale-Transporte</h1>
+            <p>Roteirização oficial e cálculo de benefícios para admissão e folha</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -424,7 +389,6 @@ def main():
     # ===================== SIDEBAR — Painel de Simulação =====================
     with st.sidebar:
         st.markdown("### 🎛️ Painel de Simulação")
-        st.caption("Preencha os dados e clique em **Calcular**. Nenhum dado é gravado — tudo permanece em memória.")
 
         st.markdown("**Origem e Destino**")
         origem_input = _render_endereco_autocomplete("origem", "Origem (CEP ou endereço)", "06310-000")
@@ -443,99 +407,98 @@ def main():
                 help="Comparativo exibe VT e VC lado a lado para decisão de RH.",
             )
 
-            st.markdown("**Parâmetros de Cálculo**")
-            # Calendário por escala/município — cálculo exato de dias úteis
-            st.markdown("*Calendário — escala e município da unidade*")
-            esc_opts = ["5x2", "6x1", "12x36", "Híbrido (3x2)"]
-            esc_default = st.session_state.get("escala", "5x2")
-            # normaliza label
-            if esc_default.lower().replace(" ", "") in ["hibrido(3x2)", "hibrido", "3x2"]:
-                esc_default = "Híbrido (3x2)"
-            escala_input = st.selectbox(
-                "Escala",
-                options=esc_opts,
-                index=esc_opts.index(esc_default) if esc_default in esc_opts else 0,
-                help="5x2 Seg-Sex | 6x1 folga domingo | 12x36 dia 1 trabalhado | Híbrido 3x2 Seg-Qua presenciais. Desconta feriados nacionais (inclui 20/11 Lei 14.759/2023) + municipais Grande SP.",
-            )
-            c_uf, c_mun = st.columns(2)
-            with c_uf:
-                uf_opts = ["SP", "RJ", "MG", "Outro"]
-                uf_cur = str(st.session_state.get("uf_destino", "SP")).upper()
-                if uf_cur not in uf_opts:
-                    uf_cur = "SP"
-                uf_input = st.selectbox("UF unidade", options=uf_opts, index=uf_opts.index(uf_cur))
-            with c_mun:
-                mun_opts = ["São Paulo", "Carapicuíba", "Osasco", "Barueri", "Cotia", "Alphaville", "Outro"]
-                mun_cur = str(st.session_state.get("municipio_destino", "São Paulo"))
-                if mun_cur not in mun_opts:
-                    mun_cur = "São Paulo"
-                municipio_input = st.selectbox("Município unidade (Grande SP)", options=mun_opts, index=mun_opts.index(mun_cur), help="Municipal: SP 25/01, Carapicuíba 26/03, Osasco 19/02, Barueri 11/03 (Alphaville), Cotia 02/04.")
-            c_ano, c_mes = st.columns(2)
-            with c_ano:
-                ano_input = st.number_input("Ano competência", min_value=2020, max_value=2100, value=int(st.session_state.get("ano_ref", datetime.now().year)), step=1)
-            with c_mes:
-                mes_input = st.number_input("Mês competência", min_value=1, max_value=12, value=int(st.session_state.get("mes_ref", datetime.now().month)), step=1)
-            dias_override_input = st.number_input(
-                "Override dias úteis (opcional)",
-                min_value=0, max_value=31, value=0, step=1,
-                help="0 = cálculo automático por escala/feriados. Informe 1-31 para sobrescrever manualmente (auditoria).",
-            )
-            # Preview do cálculo (sem cache — puro)
-            try:
-                _dias_override_preview = int(dias_override_input) if int(dias_override_input) > 0 else None
-                _prev = calcular_dias_uteis(int(ano_input), int(mes_input), escala_input, uf_input, municipio_input, dias_override=_dias_override_preview)
-                if _prev.get("sucesso"):
-                    st.caption(f"📅 Dias úteis calculados: **{int(_prev['dias_uteis'])}** ({int(_prev['dias_brutos'])} brutos - {len(_prev.get('feriados_descontados', []))} feriados) — {escala_input} {int(mes_input):02d}/{int(ano_input)} {uf_input}/{municipio_input}" + (" — override manual" if _prev.get("dias_override_aplicado") else ""))
-                else:
-                    st.caption(f"⚠️ {_prev.get('erro','Falha no calendário')}")
-            except Exception:
-                pass
-            c1, c2 = st.columns(2)
-            with c1:
-                dias_input_hidden = st.number_input("Dias úteis (fallback)", min_value=1, max_value=31, value=int(st.session_state.dias_uteis), step=1, help="Usado apenas se calendário falhar. Normalmente use o override acima.")
-                dias_input = dias_input_hidden
-            with c2:
-                st.caption("Tarifa oficial por linha/operadora aplicada automaticamente via catálogo RMSP + GTFS.")
-            # Override opcional (avançado) — fora do fluxo obrigatório
-            with st.expander("⚙️ Tarifa diferenciada / convênio (opcional)", expanded=False):
-                st.caption("Deixe 0 para usar tarifas oficiais por linha (recomendado). Informe valor apenas se o RH tiver convênio/tarifa diferenciada.")
+            with st.expander("⚙️ Parâmetros Avançados (Escala, Salário CLT e Convênio)", expanded=False):
+                # Calendário por escala/município — cálculo exato de dias úteis
+                st.markdown("*Calendário — escala e município da unidade*")
+                esc_opts = ["5x2", "6x1", "12x36", "Híbrido (3x2)"]
+                esc_default = st.session_state.get("escala", "5x2")
+                # normaliza label
+                if esc_default.lower().replace(" ", "") in ["hibrido(3x2)", "hibrido", "3x2"]:
+                    esc_default = "Híbrido (3x2)"
+                escala_input = st.selectbox(
+                    "Escala",
+                    options=esc_opts,
+                    index=esc_opts.index(esc_default) if esc_default in esc_opts else 0,
+                    help="Define quais dias são trabalhados no mês. Feriados nacionais e municipais são descontados automaticamente.",
+                )
+                c_uf, c_mun = st.columns(2)
+                with c_uf:
+                    uf_opts = ["SP", "RJ", "MG", "Outro"]
+                    uf_cur = str(st.session_state.get("uf_destino", "SP")).upper()
+                    if uf_cur not in uf_opts:
+                        uf_cur = "SP"
+                    uf_input = st.selectbox("UF unidade", options=uf_opts, index=uf_opts.index(uf_cur))
+                with c_mun:
+                    mun_opts = ["São Paulo", "Carapicuíba", "Osasco", "Barueri", "Cotia", "Alphaville", "Outro"]
+                    mun_cur = str(st.session_state.get("municipio_destino", "São Paulo"))
+                    if mun_cur not in mun_opts:
+                        mun_cur = "São Paulo"
+                    municipio_input = st.selectbox("Município unidade (Grande SP)", options=mun_opts, index=mun_opts.index(mun_cur), help="Feriados municipais da unidade.")
+                c_ano, c_mes = st.columns(2)
+                with c_ano:
+                    ano_input = st.number_input("Ano competência", min_value=2020, max_value=2100, value=int(st.session_state.get("ano_ref", datetime.now().year)), step=1)
+                with c_mes:
+                    mes_input = st.number_input("Mês competência", min_value=1, max_value=12, value=int(st.session_state.get("mes_ref", datetime.now().month)), step=1)
+                dias_override_input = st.number_input(
+                    "Override dias úteis (opcional)",
+                    min_value=0, max_value=31, value=0, step=1,
+                    help="0 = cálculo automático por escala/feriados. Informe 1-31 para sobrescrever manualmente.",
+                )
+                # Preview do cálculo (sem cache — puro)
+                try:
+                    _dias_override_preview = int(dias_override_input) if int(dias_override_input) > 0 else None
+                    _prev = calcular_dias_uteis(int(ano_input), int(mes_input), escala_input, uf_input, municipio_input, dias_override=_dias_override_preview)
+                    if _prev.get("sucesso"):
+                        st.caption(f"📅 Dias úteis calculados: **{int(_prev['dias_uteis'])}** ({int(_prev['dias_brutos'])} brutos - {len(_prev.get('feriados_descontados', []))} feriados) — {escala_input} {int(mes_input):02d}/{int(ano_input)} {uf_input}/{municipio_input}" + (" — override manual" if _prev.get("dias_override_aplicado") else ""))
+                    else:
+                        st.caption("Não foi possível calcular os dias úteis automaticamente.")
+                except Exception:
+                    pass
+                c1, c2 = st.columns(2)
+                with c1:
+                    dias_input_hidden = st.number_input("Dias úteis (manual)", min_value=1, max_value=31, value=int(st.session_state.dias_uteis), step=1, help="Usado apenas se o calendário falhar.")
+                    dias_input = dias_input_hidden
+                with c2:
+                    st.caption("Tarifa oficial por linha aplicada automaticamente quando o override é 0.")
                 tarifa_input = st.number_input(
                     "Override tarifa unitária (R$) — 0 = oficial",
                     min_value=0.0,
                     value=float(st.session_state.get("tarifa", 0.0) or 0.0),
                     step=0.10,
                     format="%.2f",
-                    help="Quando >0, sobrescreve todas as tarifas oficiais com trilha auditável. 0 mantém catálogo RMSP.",
+                    help="Deixe 0,00 para usar a tarifa oficial da linha. Informe um valor apenas para convênio/tarifa diferenciada.",
                 )
-            valor_km_input = st.number_input(
-                "Valor por KM — Vale-Combustível (R$)",
-                min_value=0.0,
-                value=float(st.session_state.valor_km),
-                step=0.05,
-                format="%.2f",
-                help="Aplicado apenas em VC e Comparativo. Ex: R$ 1,25/km",
-            )
-            salario_base_input = st.number_input(
-                "Salário Base (R$) — opcional (Lei 7.418/85)",
-                min_value=0.0,
-                value=float(st.session_state.get("salario_base", 0.0)),
-                step=100.0,
-                format="%.2f",
-                help="Se 0 = não informado. Quando preenchido, calcula teto 6% e rateio Empresa vs Colaborador. Dado mantido só em st.session_state (LGPD stateless).",
-            )
+                valor_km_input = st.number_input(
+                    "Valor por KM — Vale-Combustível (R$)",
+                    min_value=0.0,
+                    value=float(st.session_state.valor_km),
+                    step=0.05,
+                    format="%.2f",
+                    help="Aplicado apenas em Vale-Combustível e Comparativo.",
+                )
+                salario_base_input = st.number_input(
+                    "Salário Base (R$) — opcional (Lei 7.418/85)",
+                    min_value=0.0,
+                    value=float(st.session_state.get("salario_base", 0.0)),
+                    step=100.0,
+                    format="%.2f",
+                    help="Se 0 = não informado. Quando preenchido, calcula o teto de 6% e o rateio Empresa vs Colaborador.",
+                )
 
             st.markdown("")
             submitted = st.form_submit_button("🔍 Calcular Rota e Benefício", width='stretch', type="primary")
 
         # Ações de limpeza
         if st.button("🧹 Limpar Simulação", width='stretch'):
-            for k in ["resultado", "resultado_vt", "resultado_vc", "coords", "pdf_buffer", "batch_df", "batch_resultados", "comparativo", "memoria_calendario", "origem_selecionada", "destino_selecionada"]:
+            for k in ["resultado", "resultado_vt", "resultado_vc", "coords", "pdf_buffer", "batch_df", "batch_resultados", "comparativo", "memoria_calendario", "geo_auditoria", "origem_selecionada", "destino_selecionada"]:
                 st.session_state[k] = None
             for k in ["origem_texto", "destino_texto", "origem_numero", "destino_numero"]:
                 st.session_state[k] = ""
             st.session_state["rota_selecionada"] = "economica"
             st.session_state["ultimo_calculo_em"] = None
             st.session_state["salario_base"] = 0.0
+            st.session_state["tarifa"] = 0.0
+            st.session_state["valor_km"] = 1.25
             st.session_state["dias_override"] = None
             st.rerun()
 
@@ -647,20 +610,21 @@ def main():
                             n_media = int((df_res["nivel_precisao"] == "MEDIA").sum()) if "nivel_precisao" in df_res.columns else 0
                             n_baixa = int((df_res["nivel_precisao"] == "BAIXA").sum()) if "nivel_precisao" in df_res.columns else 0
                             c1, c2, c3 = st.columns(3)
-                            c1.metric("🟢 Exatos", n_alta, help="ALTA — logradouro + número/CEP específico")
-                            c2.metric("🟡 Aproximados", n_media, help="MEDIA — apenas logradouro sem número ou bairro")
-                            c3.metric("🔴 Para Revisão", n_baixa, help="BAIXA — fallback centro do município / erro de geocodificação")
+                            c1.metric("🟢 Exatos", n_alta, help="Endereço com logradouro e número/CEP específico")
+                            c2.metric("🟡 Aproximados", n_media, help="Apenas logradouro, sem número, ou bairro")
+                            c3.metric("🔴 Para Revisão", n_baixa, help="Localização aproximada ou endereço não localizado")
                             # Filtro rápido visual (não afeta CSV completo)
                             filtrar_revisao = st.checkbox("Mostrar apenas endereços que exigem revisão (🟡/🔴)", value=False, key="filtro_revisao_lote")
+                            # Exibição em linguagem de negócio (CSV mantém a trilha técnica completa)
                             if filtrar_revisao:
                                 df_exib = df_res[df_res["nivel_precisao"].isin(["MEDIA", "BAIXA"])] if "nivel_precisao" in df_res.columns else df_res
                                 if df_exib.empty:
                                     st.info("Nenhum endereço com 🟡/🔴 — todos são 🟢 Exatos.")
                                 else:
-                                    st.dataframe(df_exib, width='stretch', height=260)
+                                    st.dataframe(_df_lote_para_exibicao(df_exib), width='stretch', height=260)
                                     st.caption(f"Exibindo {len(df_exib)} de {len(df_res)} — filtro 🟡/🔴 ativo. O CSV abaixo exporta o lote **completo** ({len(df_res)} linhas).")
                             else:
-                                st.dataframe(df_res, width='stretch', height=260)
+                                st.dataframe(_df_lote_para_exibicao(df_res), width='stretch', height=260)
                             # Download em memória — sempre lote completo com nivel_precisao/semaforo/motivo_precisao
                             csv_buf = io.StringIO()
                             df_res.to_csv(csv_buf, index=False)
@@ -671,8 +635,8 @@ def main():
                                 mime="text/csv",
                                 width='stretch',
                             )
-                            # --- Exportação padronizada para portais de benefícios (BytesIO, LGPD) ---
-                            st.markdown("**Exportação padronizada para portais de benefícios (LGPD — CPF mascarado, BytesIO):**")
+                            # --- Exportação padronizada para portais de benefícios (CPF mascarado) ---
+                            st.markdown("**Exportação para portais de benefícios (CPF mascarado):**")
                             layout_lote = st.radio(
                                 "Selecione o layout",
                                 options=["Padrão Compra (SPTrans/TOP)", "Rubrica Folha (eSocial/ERP)"],
@@ -721,11 +685,11 @@ def main():
                                 else:
                                     exp_res = gerar_export_rubrica(df_export_src, dias_uteis=int(_dias_export), competencia=comp_export)
                                 if exp_res.get("sucesso"):
-                                    st.caption(f"Layout **{layout_lote}** — {len(export_rows)} registros, {_dias_export} dias úteis, competência {comp_export}. CPF mascarado, utf-8-sig, BytesIO.")
+                                    st.caption(f"Layout **{layout_lote}** — {len(export_rows)} registros, {_dias_export} dias úteis, competência {comp_export}. CPF protegido.")
                                     for m in exp_res.get("memoria_calculo", [])[:2]:
                                         st.caption(f"• {m}")
                                     st.download_button(
-                                        f"⬇️ Baixar {layout_lote} (CSV utf-8-sig, BytesIO)",
+                                        f"⬇️ Baixar {layout_lote} (CSV)",
                                         data=exp_res["bytesio"].getvalue(),
                                         file_name=exp_res["filename"],
                                         mime="text/csv",
@@ -733,12 +697,12 @@ def main():
                                         key="download_lote_export",
                                     )
                                 else:
-                                    st.warning(f"Falha no export {layout_lote}: {exp_res.get('erro','')}")
-                            except Exception as _exc_exp:
-                                st.warning(f"Não foi possível gerar export padronizado: {_exc_exp}")
+                                    st.warning(f"Não foi possível gerar a exportação no layout {layout_lote}.")
+                            except Exception:
+                                st.warning("Não foi possível gerar a exportação padronizada para este lote.")
                         progresso.empty()
-                except Exception as exc:
-                    st.error(f"Falha ao ler arquivo: {exc}")
+                except Exception:
+                    st.error("Não foi possível ler o arquivo. Use CSV ou Excel com as colunas origem e destino.")
             else:
                 # Modelo para download — gerado em memória
                 st.markdown("**Modelo de planilha:**")
@@ -758,7 +722,6 @@ def main():
                 st.caption("Colunas obrigatórias: **origem**, **destino**. Opcional: **nome**, **salario_base** (ex: 2500.00 ou R$ 2.500,00). Saída inclui **teto_6_pct, desconto_colaborador, subsidio_empresa, status_viabilidade_clt**.")
 
         st.divider()
-        st.caption("🔒 **LGPD / Stateless:** nenhum dado persiste em banco. PDFs e mapas são gerados em `BytesIO` e mantidos apenas em `st.session_state`.")
 
     # ===================== PROCESSAMENTO DO FORM =====================
     if submitted:
@@ -779,13 +742,13 @@ def main():
                     memoria_cal = _cal.get("memoria_calculo", [])
                 else:
                     dias_efetivos = int(dias_input)
-                    memoria_cal = [f"Calendário falhou ({_cal.get('erro','')}) — fallback {dias_efetivos} dias."]
+                    memoria_cal = [f"Não foi possível calcular os feriados — usando {dias_efetivos} dias úteis informados manualmente."]
                     _cal = {"sucesso": False, "dias_uteis": dias_efetivos, "memoria_calculo": memoria_cal, "justificativa": "Fallback dias úteis."}
-            except Exception as _exc:
+            except Exception:
                 dias_efetivos = int(dias_input)
-                memoria_cal = [f"Calendário exceção: {_exc} — fallback {dias_efetivos} dias."]
+                memoria_cal = [f"Não foi possível calcular os feriados — usando {dias_efetivos} dias úteis informados manualmente."]
                 _cal = {"sucesso": False, "dias_uteis": dias_efetivos, "memoria_calculo": memoria_cal, "justificativa": "Fallback."}
-            with st.spinner("🔎 Geocodificando endereços e roteirizando via OTP/OSRM…"):
+            with st.spinner("🔎 Localizando endereços e calculando a rota…"):
                 try:
                     tarifa_override = float(tarifa_input) if float(tarifa_input) > 0 else None
                     payload, coords, origem_label, destino_label, geos = _processar_calculo(
@@ -797,7 +760,7 @@ def main():
                         float(valor_km_input),
                     )
                     if not payload.get("sucesso"):
-                        st.error(payload.get("erro", "Falha no cálculo."))
+                        st.error(payload.get("erro", "Não foi possível concluir o cálculo."))
                     else:
                         # Persiste tudo em session_state (stateless)
                         st.session_state.resultado = payload["principal"]
@@ -817,6 +780,13 @@ def main():
                         st.session_state.mes_ref = int(mes_input)
                         st.session_state.dias_override = _ov
                         st.session_state.memoria_calendario = _cal
+                        st.session_state.geo_auditoria = [
+                            f"Precisão geográfica ({rotulo}): {geo.get('nivel_precisao', '—')} — "
+                            f"fonte {geo.get('fonte', '—')} — "
+                            f"{geo.get('label_exibicao') or geo.get('endereco_encontrado') or '—'}"
+                            for rotulo, geo in (("origem", geos[0]), ("destino", geos[1]))
+                            if isinstance(geo, dict)
+                        ]
                         st.session_state.tarifa = float(tarifa_input)
                         st.session_state.valor_km = float(valor_km_input)
                         st.session_state.salario_base = float(salario_base_input) if salario_base_input is not None else 0.0
@@ -824,13 +794,11 @@ def main():
                         st.session_state.pdf_buffer = None  # invalida PDF anterior
                         # Feedback
                         if payload["principal"] and payload["principal"].get("sucesso") is False:
-                            st.error(payload["principal"].get("erro", "Não foi possível calcular."))
+                            st.error("Não foi possível concluir o cálculo. Revise os dados informados.")
                         else:
                             st.toast("Rota calculada com sucesso!", icon="✅")
-                except Exception as exc:
-                    st.error(f"Erro inesperado no cálculo: {exc}")
-                    with st.expander("Detalhes técnicos"):
-                        st.code(traceback.format_exc())
+                except Exception:
+                    st.error("Não foi possível concluir o cálculo. Tente novamente em instantes.")
 
     # ===================== ÁREA PRINCIPAL — Dashboard =====================
     # Métricas no topo
@@ -839,44 +807,14 @@ def main():
     dias_uteis_atual = st.session_state.dias_uteis
 
     if resultado is None:
-        st.info("👈 Preencha o **Painel de Simulação** na lateral e clique em **Calcular Rota e Benefício** para ver o dashboard. O autocomplete geocodifica sob demanda com cache de 1h; o cálculo só ocorre no clique.")
-        # Exemplo ilustrativo estático
-        st.markdown("#### Exemplo de fluxo")
-        st.markdown(
-            "- **Origem:** Carapicuíba (CEP 06310-000) → **Destino:** Pinheiros (Av. Faria Lima)  \n"
-            "- O sistema geocodifica via **ViaCEP → Nominatim**, roteiriza via **OTP (GTFS)** com fallback OSRM e gera **mapa + PDF em memória**."
-        )
+        st.info("👈 Preencha **Origem** e **Destino** no painel lateral e clique em **Calcular Rota e Benefício**.")
         # Placeholder cards vazios para layout estável
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Distância Estimada", "—", help="Preenchido após cálculo")
         c2.metric("Tempo de Deslocamento", "—")
         c3.metric("Custo Diário (Ida + Volta)", "—")
         c4.metric(f"Custo Mensal ({dias_uteis_atual} dias)", "—")
-
-        # Tabs vazias mas visíveis para validação visual
-        tab_mapa, tab_pdf, tab_status = st.tabs(["🗺️ Mapa & Itinerário", "📄 Relatório PDF", "⚙️ Status da Infraestrutura"])
-        with tab_mapa:
-            st.caption("O mapa e o itinerário passo a passo aparecerão aqui após o cálculo.")
-            st.image("https://via.placeholder.com/900x300?text=Mapa+aparecer%C3%A1+ap%C3%B3s+calcular+a+rota", use_container_width=True)
-        with tab_pdf:
-            st.caption("O resumo da memória de cálculo e o botão de download do PDF aparecerão aqui.")
-        with tab_status:
-            st.caption("Indicadores de saúde da infraestrutura em tempo real.")
-            # Renderiza status real mesmo sem cálculo
-            col_a, col_b = st.columns(2)
-            with col_a:
-                pg = _verificar_postgres()
-                if pg["sucesso"]:
-                    st.success(f"**PostgreSQL:** Online ✅  — `PostGIS: {pg['versao'] or 'detectado'}`")
-                else:
-                    st.error(f"**PostgreSQL:** Offline / Fallback ⚠️ — {pg.get('erro','indisponível')[:120]}")
-            with col_b:
-                otp = _verificar_otp()
-                if otp["sucesso"]:
-                    st.success(f"**OpenTripPlanner (OTP):** Online ✅ — `{otp['url']}`")
-                else:
-                    st.warning(f"**OTP:** Fallback ativo ⚠️ — {otp.get('erro','offline')[:120]}  — usando estimativa de contingência")
-            st.info("O cálculo funciona mesmo em modo fallback (estimativa validada manualmente).")
+        st.caption("O mapa, o itinerário e o relatório em PDF aparecerão aqui após o cálculo.")
     else:
         # Extrai métricas do resultado principal
         dist = resultado.get("distancia_km", 0)
@@ -896,118 +834,16 @@ def main():
         # Cards de métricas
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("📏 Distância Estimada", f"{dist} km" if dist else "—", delta=None)
-        m2.metric("⏱️ Tempo de Deslocamento", _format_tempo(tempo_min), help="Estimativa heurística (OTP não expõe duração nesta versão)")
+        m2.metric("⏱️ Tempo de Deslocamento", _format_tempo(tempo_min), help="Tempo estimado de deslocamento porta a porta.")
         m3.metric("💰 Custo Diário (Ida + Volta)", f"R$ {float(custo_diario):.2f}" if custo_diario is not None else "—")
         m4.metric(f"🗓️ Custo Mensal ({dias_uteis_atual} dias)", f"R$ {float(custo_mensal):.2f}" if custo_mensal is not None else "—")
-        # Memória calendário — trilha auditável de dias úteis por escala/município
-        _cal_mem = st.session_state.get("memoria_calendario")
-        if _cal_mem and isinstance(_cal_mem, dict):
-            escala_show = _cal_mem.get("escala", st.session_state.get("escala", "5x2"))
-            uf_show = _cal_mem.get("uf", st.session_state.get("uf_destino", "SP"))
-            mun_show = _cal_mem.get("municipio_destino", st.session_state.get("municipio_destino", "—"))
-            st.info(f"📅 **Calendário:** Escala **{escala_show}** • **{uf_show}/{mun_show}** • {int(_cal_mem.get('mes',0)):02d}/{int(_cal_mem.get('ano',0))} • **{int(_cal_mem.get('dias_uteis', dias_uteis_atual))} dias úteis** ({int(_cal_mem.get('dias_brutos',0))} brutos - {len(_cal_mem.get('feriados_descontados',[]))} feriados)" + (" — override manual" if _cal_mem.get("dias_override_aplicado") else ""))
-            with st.expander("📋 Memória de cálculo — dias úteis por escala/município", expanded=False):
-                for linha in _cal_mem.get("memoria_calculo", []):
-                    st.caption(f"• {linha}")
-                st.caption(_cal_mem.get("justificativa",""))
-                if _cal_mem.get("feriados_descontados"):
-                    st.markdown("**Feriados descontados no mês:**")
-                    for f in _cal_mem.get("feriados_descontados", []):
-                        st.caption(f"• {f['data']} — {f['nome']}")
-        # Export individual padronizado (suporte ao fluxo individual)
-        if st.session_state.resultado_vt or st.session_state.resultado_vc:
-            with st.expander("📤 Exportação individual padronizada (BytesIO, LGPD)", expanded=False):
-                _layout_ind = st.radio("Layout", options=["Padrão Compra (SPTrans/TOP)", "Rubrica Folha (eSocial/ERP)"], index=0, horizontal=True, key="layout_individual")
-                try:
-                    _valor_ind = float(st.session_state.resultado_vt.get("custo_diario", 0) if st.session_state.resultado_vt else st.session_state.resultado_vc.get("custo_diario", 0) or 0)
-                    _dados_ind = [{"matricula": "0001", "nome": "Colaborador (simulação)", "cpf": "12345678900", "operadora": "SPTrans", "codigo_linha": "—", "valor_diario": _valor_ind, "salario_base": st.session_state.get("salario_base", 0)}]
-                    _comp_ind = f"{int(st.session_state.get('mes_ref', datetime.now().month)):02d}/{int(st.session_state.get('ano_ref', datetime.now().year))}"
-                    if _layout_ind == "Padrão Compra (SPTrans/TOP)":
-                        _exp_ind = gerar_export_compra(_dados_ind, dias_uteis=int(dias_uteis_atual), competencia=_comp_ind)
-                    else:
-                        _exp_ind = gerar_export_rubrica(_dados_ind, dias_uteis=int(dias_uteis_atual), competencia=_comp_ind)
-                    if _exp_ind.get("sucesso"):
-                        st.caption(f"{_exp_ind.get('justificativa','')}")
-                        st.download_button("⬇️ Baixar export individual (CSV utf-8-sig)", data=_exp_ind["bytesio"].getvalue(), file_name=_exp_ind["filename"], mime="text/csv", width='stretch', key="download_individual_export")
-                    else:
-                        st.warning(_exp_ind.get("erro","Falha no export individual"))
-                except Exception as _e:
-                    st.warning(f"Export individual indisponível: {_e}")
 
-        # Aviso de fallback se houver
+        # Aviso único quando a rota oficial não pôde ser obtida (estimativa provisória)
         if resultado.get("aviso"):
-            st.warning(f"ℹ️ {resultado.get('aviso')} — Fonte: **{resultado.get('fonte','—')}**")
-        elif resultado.get("fonte"):
-            st.caption(f"Fonte da roteirização: **{resultado.get('fonte')}**  •  Atualizado em {st.session_state.ultimo_calculo_em.strftime('%d/%m/%Y %H:%M') if st.session_state.ultimo_calculo_em else ''}")
+            st.warning(resultado["aviso"])
 
-        # Comparativo Econômica vs Rápida (fare_engine) — seletor e economia mensal
+        # --- Viabilidade CLT 6% — exibida apenas quando o salário base é informado ---
         comparativo = st.session_state.get("comparativo")
-        if comparativo and comparativo.get("sucesso") and comparativo.get("rota_mais_rapida"):
-            rapida = comparativo["rota_mais_rapida"]
-            economica = comparativo.get("rota_mais_economica")
-            economia_mensal = comparativo.get("economia_mensal", 0.0)
-            # Métrica de economia (reflete no dashboard)
-            if economica is None:
-                st.warning(f"⚠️ Nenhuma rota elegível para 'Mais Econômica' (limite: ≤1.5 km caminhada e ≤3 baldeações). Exibindo apenas a mais rápida.")
-            else:
-                # Seletor
-                opcoes = ["Mais Econômica", "Mais Rápida"]
-                idx_default = 0 if st.session_state.get("rota_selecionada", "economica") == "economica" else 1
-                escolha = st.radio(
-                    "Comparativo de tarifa — escolha a referência para detalhamento e PDF:",
-                    options=opcoes,
-                    index=idx_default,
-                    horizontal=True,
-                    key="radio_comparativo",
-                )
-                st.session_state.rota_selecionada = "economica" if escolha == "Mais Econômica" else "rapida"
-                # Cards comparativos
-                col_r, col_e, col_ec = st.columns(3)
-                with col_r:
-                    st.markdown(
-                        f"""
-                        <div style="background:#EFF6FF;border:1px solid #DBEAFE;border-radius:12px;padding:12px 14px;">
-                        <b>⚡ Mais Rápida</b><br>
-                        {rapida.get('duracao_min',0)} min • {rapida.get('distancia_km',0)} km • {rapida.get('baldeacoes',0)} baldeações • {rapida.get('caminhada_km',0)} km caminhada<br>
-                        <b>R$ {rapida.get('custo_trecho',0):.2f}</b> / trecho • <b>R$ {rapida.get('custo_diario',0):.2f}</b> /dia • <b>R$ {rapida.get('custo_mensal',0):.2f}</b> /mês
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                with col_e:
-                    if economica:
-                        st.markdown(
-                            f"""
-                            <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-radius:12px;padding:12px 14px;">
-                            <b>💰 Mais Econômica</b> {"(empate)" if economica.get('indice')==rapida.get('indice') else ""}<br>
-                            {economica.get('duracao_min',0)} min • {economica.get('distancia_km',0)} km • {economica.get('baldeacoes',0)} baldeações • {economica.get('caminhada_km',0)} km caminhada<br>
-                            <b>R$ {economica.get('custo_trecho',0):.2f}</b> / trecho • <b>R$ {economica.get('custo_diario',0):.2f}</b> /dia • <b>R$ {economica.get('custo_mensal',0):.2f}</b> /mês
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        st.info("Sem rota econômica elegível.")
-                with col_ec:
-                    st.metric("💸 Economia mensal (vs rápida)", f"R$ {economia_mensal:.2f}", delta=f"-R$ {economia_mensal:.2f}" if economia_mensal>0 else "empate")
-                    st.caption(comparativo.get("justificativa",""))
-                # Detalhamento tarifário da rota selecionada
-                rota_ref = economica if st.session_state.rota_selecionada == "economica" and economica else rapida
-                if rota_ref.get("detalhamento_tarifario"):
-                    with st.expander("🧾 Detalhamento tarifário — rota selecionada", expanded=True):
-                        for linha in rota_ref["detalhamento_tarifario"]:
-                            st.markdown(f"- {linha}")
-                        # Memória de cálculo
-                        if rota_ref.get("memoria_calculo"):
-                            st.markdown("**Memória de cálculo (auditoria):**")
-                            for m in rota_ref["memoria_calculo"]:
-                                st.caption(f"• {m}")
-                # Atualiza métricas principais para refletir seleção (sobrescreve custo_diario/mensal do card superior se VT)
-                if modalidade_atual in ("Vale-Transporte", "Comparativo Completo") and rota_ref:
-                    # Re-renderiza métrica de economia no contexto já exibido via caption abaixo
-                    st.caption(f"Exibindo valores da rota **{'Mais Econômica' if st.session_state.rota_selecionada=='economica' and economica else 'Mais Rápida'}** — custo trecho R$ {rota_ref.get('custo_trecho',0):.2f} | diário R$ {rota_ref.get('custo_diario',0):.2f} | mensal R$ {rota_ref.get('custo_mensal',0):.2f}")
-
-        # --- Card/Banner de Viabilidade CLT 6% — reativo ao seletor Rápida/Econômica (ajuste #3) ---
         if modalidade_atual in ("Vale-Transporte", "Comparativo Completo"):
             # custo mensal da opção ativa (economica/rapida) ou fallback do VT
             custo_clt = None
@@ -1037,57 +873,23 @@ def main():
                         st.caption(viab.get("justificativa",""))
                 except Exception:
                     pass
-            elif salario_clt == 0 and custo_clt is not None:
-                st.info("ℹ️ **Viabilidade CLT 6%:** informe o **Salário Base (R$)** na barra lateral para ver o rateio Empresa vs Colaborador (Lei 7.418/85).")
-            # else: sem custo, não exibe
 
-        # Comparativo: resumo rápido quando modo comparativo
-        if modalidade_atual == "Comparativo Completo" and st.session_state.resultado_vt and st.session_state.resultado_vc:
-            st.markdown("##### 🔀 Comparativo — Resumo")
-            cc1, cc2 = st.columns(2)
-            vt = st.session_state.resultado_vt
-            vc = st.session_state.resultado_vc
-            with cc1:
-                st.markdown(
-                    f"""
-                    <div style="background:#EFF6FF;border:1px solid #DBEAFE;border-radius:12px;padding:12px 14px;">
-                    <b>🚌 Vale-Transporte</b><br>
-                    Distância: <b>{vt.get('distancia_km')} km</b> • Diário: <b>R$ {vt.get('custo_diario',0):.2f}</b> • Mensal ({dias_uteis_atual}d): <b>R$ {vt.get('custo_mensal',0):.2f}</b><br>
-                    <span style="color:#475569;font-size:0.85em;">{vt.get('resumo_trajeto','')[:160]}</span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            with cc2:
-                st.markdown(
-                    f"""
-                    <div style="background:#FEF3C7;border:1px solid #FDE68A;border-radius:12px;padding:12px 14px;">
-                    <b>🚗 Vale-Combustível</b><br>
-                    Distância: <b>{vc.get('distancia_km')} km</b> • Diário (ida+volta): <b>R$ {vc.get('custo_diario',0):.2f}</b> • Mensal ({dias_uteis_atual}d): <b>R$ {vc.get('custo_mensal',0):.2f}</b><br>
-                    <span style="color:#475569;font-size:0.85em;">Valor KM: R$ {vc.get('valor_km',0):.2f}</span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+        # Navegação em 2 abas
+        tab_mapa, tab_pdf = st.tabs(["🗺️ Itinerário Detalhado", "📄 Relatório PDF"])
 
-        # Navegação em 3 abas
-        tab_mapa, tab_pdf, tab_status = st.tabs(["🗺️ Mapa & Itinerário", "📄 Relatório PDF", "⚙️ Status da Infraestrutura"])
-
-        # ---------------- Aba 1 — Mapa & Itinerário ----------------
+        # ---------------- Aba 1 — Itinerário Detalhado ----------------
         with tab_mapa:
-            st.markdown("#### 🗺️ Mapa & Itinerário — largura total")
+            st.markdown("#### Itinerário Detalhado")
             coords = st.session_state.coords
             # Mapa estático em largura total
             if coords and len(coords) == 4:
                 try:
                     img_buf = gerar_imagem_mapa_rota(*coords)
-                    st.image(img_buf, caption=f"Trajeto: {st.session_state.origem_label} → {st.session_state.destino_label}", use_container_width=True)
-                except Exception as exc:
-                    st.warning(f"Não foi possível renderizar o mapa estático: {exc}")
-                    # Fallback: mostra coordenadas
-                    st.code(f"Origem: {coords[0]:.5f}, {coords[1]:.5f}  →  Destino: {coords[2]:.5f}, {coords[3]:.5f}")
+                    st.image(img_buf, caption=f"Trajeto: {st.session_state.origem_label} → {st.session_state.destino_label}", width="stretch")
+                except Exception:
+                    st.warning("Não foi possível exibir o mapa deste trajeto.")
             else:
-                st.info("Coordenadas indisponíveis para renderizar o mapa.")
+                st.info("Mapa indisponível para este trajeto.")
 
             st.divider()
             # Detalhamento passo a passo
@@ -1095,11 +897,9 @@ def main():
                 vc = st.session_state.resultado_vc
                 if modalidade_atual == "Vale-Combustível":
                     st.markdown("##### 🚗 Detalhamento — Vale-Combustível")
-                    st.markdown(f"- **Distância rodoviária (OSRM):** `{vc.get('distancia_km')} km`")
-                    st.markdown(f"- **Valor por KM:** `R$ {vc.get('valor_km', st.session_state.valor_km):.2f}`")
-                    st.markdown(f"- **Custo diário (ida+volta):** `R$ {vc.get('custo_diario',0):.2f}` → **Mensal ({dias_uteis_atual}d): `R$ {vc.get('custo_mensal',0):.2f}`**")
-                    if vc.get("sucesso") is False:
-                        st.error(vc.get("erro", "Falha no cálculo VC."))
+                    st.markdown(f"- **Distância do trajeto:** {vc.get('distancia_km')} km")
+                    st.markdown(f"- **Valor por KM:** R$ {vc.get('valor_km', st.session_state.valor_km):.2f}")
+                    st.markdown(f"- **Custo diário (ida+volta):** R$ {vc.get('custo_diario',0):.2f} → **Mensal ({dias_uteis_atual}d): R$ {vc.get('custo_mensal',0):.2f}**")
 
             if modalidade_atual in ("Vale-Transporte", "Comparativo Completo") and st.session_state.resultado_vt:
                 vt = st.session_state.resultado_vt
@@ -1109,41 +909,94 @@ def main():
                 detalhes = vt.get("detalhes") or []
                 if detalhes:
                     df_det = pd.DataFrame(detalhes)
-                    col_map = {"linha": "Linha / Modal", "codigo_linha": "Código", "operadora": "Operadora", "valor_unitario": "Tarifa (R$)", "quantidade_dia": "Qtd/dia", "subtotal": "Subtotal (R$)", "fonte": "Fonte", "tarifa_confirmada": "Confirmada"}
+                    col_map = {"linha": "Linha / Modal", "codigo_linha": "Código", "operadora": "Operadora", "valor_unitario": "Tarifa (R$)", "quantidade_dia": "Qtd/dia", "subtotal": "Subtotal (R$)", "tarifa_confirmada": "Tarifa"}
                     # garante colunas mesmo quando legado
-                    for c in ["codigo_linha", "operadora", "fonte", "tarifa_confirmada"]:
+                    for c in ["codigo_linha", "operadora", "tarifa_confirmada"]:
                         if c not in df_det.columns:
                             df_det[c] = "—" if c != "tarifa_confirmada" else True
                     # formata confirmada como ícone
-                    df_det["tarifa_confirmada"] = df_det["tarifa_confirmada"].map(lambda x: "✅" if x else "⚠️ A confirmar")
+                    df_det["tarifa_confirmada"] = df_det["tarifa_confirmada"].map(lambda x: "✅ Oficial" if x else "⚠️ A confirmar")
                     df_show = df_det.rename(columns=col_map)
                     # ordena colunas na ordem canônica
-                    ordem = ["Linha / Modal", "Código", "Operadora", "Tarifa (R$)", "Qtd/dia", "Subtotal (R$)", "Fonte", "Confirmada"]
+                    ordem = ["Linha / Modal", "Código", "Operadora", "Tarifa (R$)", "Qtd/dia", "Subtotal (R$)", "Tarifa"]
                     df_show = df_show[[c for c in ordem if c in df_show.columns]]
                     st.dataframe(df_show, width='stretch', hide_index=True)
                     # alertas de tarifas não confirmadas
                     pend = [d for d in detalhes if not d.get("tarifa_confirmada")]
                     if pend:
-                        st.warning(f"⚠️ {len(pend)} linha(s) com tarifa estimada — confirmar valor oficial: " + ", ".join([f"{d.get('codigo_linha') or d.get('linha')} ({d.get('operadora')})" for d in pend]))
+                        st.warning(f"⚠️ {len(pend)} linha(s) com tarifa a confirmar — valide com o colaborador.")
                     bal = max(len(detalhes) - 1, 0)
-                    st.caption(f"**{len(detalhes)}** trecho(s) • **{bal}** baldeação(ões) • Fonte roteirização: **{vt.get('fonte','—')}** • Catálogo: **{vt.get('catalogo_versao') or '—'}**")
+                    fonte_rota = "Rota oficial" if str(vt.get("fonte", "")).startswith("OpenTripPlanner") else "Estimativa provisória"
+                    st.caption(f"**{len(detalhes)}** trecho(s) • **{bal}** baldeação(ões) • {fonte_rota}")
                     # Linha de integração destacada
                     if bal > 0:
                         st.markdown(f"🔄 **Integração:** {bal} baldeação(ões) sugerida(s) — valide com o colaborador.")
                 else:
-                    st.warning("Nenhum trecho de transporte identificado. Verifique a cobertura GTFS ou use a estimativa de contingência.")
-                if vt.get("aviso"):
-                    st.warning(vt["aviso"])
+                    st.warning("Nenhum trecho de transporte identificado para este trajeto.")
 
-            # Se comparativo, já mostrou ambos; se VT puro, já acima
+            # Alternativas de rota (mais rápida x mais econômica) — auditoria tarifária
+            if (
+                modalidade_atual in ("Vale-Transporte", "Comparativo Completo")
+                and comparativo
+                and comparativo.get("sucesso")
+                and comparativo.get("rota_mais_rapida")
+            ):
+                rapida = comparativo["rota_mais_rapida"]
+                economica = comparativo.get("rota_mais_economica")
+                if economica:
+                    st.divider()
+                    st.markdown("##### 🔀 Alternativas de rota")
+                    opcoes = ["Mais econômica", "Mais rápida"]
+                    idx_default = 0 if st.session_state.get("rota_selecionada", "economica") == "economica" else 1
+                    escolha = st.radio(
+                        "Rota de referência para o relatório",
+                        options=opcoes,
+                        index=idx_default,
+                        horizontal=True,
+                        key="radio_comparativo",
+                        label_visibility="collapsed",
+                    )
+                    st.session_state.rota_selecionada = "economica" if escolha == "Mais econômica" else "rapida"
+                    rota_ref = economica if st.session_state.rota_selecionada == "economica" else rapida
+                    st.caption(
+                        f"{rota_ref.get('duracao_min', 0)} min • {rota_ref.get('distancia_km', 0)} km • "
+                        f"{rota_ref.get('baldeacoes', 0)} baldeação(ões) • {rota_ref.get('caminhada_km', 0)} km a pé"
+                    )
+                    c_dia, c_mes, c_eco = st.columns(3)
+                    c_dia.metric("Custo diário (ida + volta)", f"R$ {rota_ref.get('custo_diario', 0):.2f}")
+                    c_mes.metric(f"Custo mensal ({dias_uteis_atual} dias)", f"R$ {rota_ref.get('custo_mensal', 0):.2f}")
+                    c_eco.metric("Economia mensal (vs. mais rápida)", f"R$ {comparativo.get('economia_mensal', 0.0):.2f}")
+                    if rota_ref.get("detalhamento_tarifario") or rota_ref.get("memoria_calculo"):
+                        with st.expander("🧾 Memória de cálculo da tarifa", expanded=False):
+                            for linha in rota_ref.get("detalhamento_tarifario", []):
+                                st.markdown(f"- {linha}")
+                            for memoria_item in rota_ref.get("memoria_calculo", []):
+                                st.caption(f"• {memoria_item}")
+
+            # Memória de cálculo dos dias úteis (escala, feriados e município)
+            _cal_mem = st.session_state.get("memoria_calendario")
+            if isinstance(_cal_mem, dict) and _cal_mem.get("dias_uteis") is not None:
+                st.divider()
+                with st.expander("📋 Memória de cálculo — dias úteis", expanded=False):
+                    n_feriados = len(_cal_mem.get("feriados_descontados", []) or [])
+                    st.caption(
+                        f"Escala {_cal_mem.get('escala', '—')} • "
+                        f"{_cal_mem.get('uf', '—')}/{_cal_mem.get('municipio_destino', '—')} • "
+                        f"{int(_cal_mem.get('mes', 0) or 0):02d}/{int(_cal_mem.get('ano', 0) or 0)} • "
+                        f"{int(_cal_mem.get('dias_uteis', dias_uteis_atual))} dias úteis "
+                        f"({int(_cal_mem.get('dias_brutos', 0) or 0)} brutos - {n_feriados} feriados)"
+                    )
+                    for linha_cal in _cal_mem.get("memoria_calculo", []) or []:
+                        st.caption(f"• {linha_cal}")
+                    if _cal_mem.get("justificativa"):
+                        st.caption(_cal_mem["justificativa"])
 
         # ---------------- Aba 2 — Relatório PDF ----------------
         with tab_pdf:
-            st.markdown("#### 📄 Relatório PDF — Memória de Cálculo")
+            st.markdown("#### 📄 Relatório PDF")
             # Resumo formatado
             vt = st.session_state.resultado_vt
             vc = st.session_state.resultado_vc
-            principal = st.session_state.resultado
 
             # Bloco origem/destino
             st.markdown(
@@ -1151,7 +1004,7 @@ def main():
                 <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:12px;padding:14px 16px;margin-bottom:12px;">
                 <b>Origem:</b> {st.session_state.origem_label}<br>
                 <b>Destino:</b> {st.session_state.destino_label}<br>
-                <b>Modalidade:</b> {modalidade_atual} &nbsp;•&nbsp; <b>Dias úteis:</b> {dias_uteis_atual} &nbsp;•&nbsp; <b>Tarifa:</b> R$ {st.session_state.tarifa:.2f} &nbsp;•&nbsp; <b>Valor KM:</b> R$ {st.session_state.valor_km:.2f}
+                <b>Modalidade:</b> {modalidade_atual} &nbsp;•&nbsp; <b>Dias úteis:</b> {dias_uteis_atual}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1161,14 +1014,14 @@ def main():
             if modalidade_atual == "Vale-Combustível" and vc:
                 if vc.get("sucesso"):
                     mem = pd.DataFrame([
-                        {"Item": "Distância (OSRM)", "Valor": f"{vc.get('distancia_km')} km"},
+                        {"Item": "Distância do trajeto", "Valor": f"{vc.get('distancia_km')} km"},
                         {"Item": "Valor por KM", "Valor": f"R$ {vc.get('valor_km',0):.2f}"},
                         {"Item": "Custo diário (ida+volta)", "Valor": f"R$ {vc.get('custo_diario',0):.2f}"},
                         {"Item": f"Estimativa mensal ({dias_uteis_atual} dias)", "Valor": f"R$ {vc.get('custo_mensal',0):.2f}"},
                     ])
                     st.table(mem)
                 else:
-                    st.error(vc.get("erro", "Falha no VC"))
+                    st.error("Não foi possível calcular o Vale-Combustível para este trajeto.")
             elif modalidade_atual == "Vale-Transporte" and vt:
                 if vt.get("sucesso") is not False:
                     mem_vt = pd.DataFrame(vt.get("detalhes", []))
@@ -1190,11 +1043,10 @@ def main():
                     if vc:
                         st.markdown(f"Distância: **{vc.get('distancia_km')} km**  \nDiário: **R$ {vc.get('custo_diario',0):.2f}**  \nMensal: **R$ {vc.get('custo_mensal',0):.2f}**")
             else:
-                # Fallback genérico
-                st.json(principal)
+                st.info("Não há dados suficientes para montar o relatório. Refaça o cálculo.")
 
             st.divider()
-            # Geração do PDF em BytesIO (stateless)
+            # Geração do PDF (em memória)
             st.markdown("**Gerar evidência auditável (PDF com mapa):**")
             # Prepara dados para pdf_generator (compatível com assinatura existente)
             # O gerador espera dados_candidato, tipo_beneficio, dados_calculo, coords
@@ -1243,6 +1095,9 @@ def main():
                         "destino": st.session_state.destino_label,
                         "resumo_trajeto": vt.get("resumo_trajeto", "") if vt else "",
                         "detalhes": vt.get("detalhes", []) if vt else [],
+                        "detalhamento_tarifario": vt.get("detalhamento_tarifario", []) if vt else [],
+                        "memoria_calculo": (vt.get("memoria_calculo", []) if vt else []),
+                        "justificativa": vt.get("justificativa", "") if vt else "",
                         "custo_diario": vt.get("custo_diario", 0) if vt else 0,
                         "custo_mensal": vt.get("custo_mensal", 0) if vt else 0,
                         "distancia_km": vt.get("distancia_km", 0) if vt else 0,
@@ -1276,6 +1131,25 @@ def main():
                         "distancia_km": vt.get("distancia_km",0) if vt else 0,
                     }
 
+            # --- Trilha auditável comum ao PDF: calendário e precisão geográfica ---
+            _memoria_auditoria = list(dados_calc.get("memoria_calculo") or [])
+            _cal_pdf = st.session_state.get("memoria_calendario")
+            if isinstance(_cal_pdf, dict) and _cal_pdf.get("dias_uteis") is not None:
+                _memoria_auditoria.append(
+                    f"Calendário: escala {_cal_pdf.get('escala', '—')} • "
+                    f"{_cal_pdf.get('uf', '—')}/{_cal_pdf.get('municipio_destino', '—')} • "
+                    f"{int(_cal_pdf.get('mes', 0) or 0):02d}/{int(_cal_pdf.get('ano', 0) or 0)} • "
+                    f"{int(_cal_pdf.get('dias_uteis', dias_uteis_atual))} dias úteis "
+                    f"({int(_cal_pdf.get('dias_brutos', 0) or 0)} brutos - "
+                    f"{len(_cal_pdf.get('feriados_descontados', []) or [])} feriados)"
+                )
+                _memoria_auditoria.extend(_cal_pdf.get("memoria_calculo", []) or [])
+                if _cal_pdf.get("justificativa"):
+                    _memoria_auditoria.append(_cal_pdf["justificativa"])
+            _memoria_auditoria.extend(st.session_state.get("geo_auditoria") or [])
+            if _memoria_auditoria:
+                dados_calc["memoria_calculo"] = _memoria_auditoria
+
             # --- Viabilidade CLT para PDF — reativa ao seletor (ajuste #3) ---
             try:
                 salario_pdf = float(st.session_state.get("salario_base", 0.0) or 0.0)
@@ -1297,13 +1171,11 @@ def main():
                     with st.expander("Memória CLT (irá para o PDF)"):
                         for linha in viab_pdf.get("memoria_calculo", []):
                             st.caption(f"• {linha}")
-                elif salario_pdf == 0:
-                    st.caption("ℹ️ Informe **Salário Base** na barra lateral para incluir o quadro de rateio CLT 6% no PDF.")
             except Exception:
                 pass
 
             # Botão para gerar PDF (mantém em session_state)
-            if st.button("📄 Gerar PDF em Memória (BytesIO)", width='stretch'):
+            if st.button("📄 Gerar PDF", width='stretch'):
                 try:
                     with st.spinner("Gerando PDF…"):
                         pdf_buf = gerar_pdf_evidencia(dados_candidato, tipo_pdf, dados_calc, coords=st.session_state.coords)
@@ -1316,10 +1188,9 @@ def main():
                             b = io.BytesIO(pdf_buf if isinstance(pdf_buf, (bytes, bytearray)) else bytes(pdf_buf))
                             b.seek(0)
                             st.session_state.pdf_buffer = b
-                    st.success("PDF gerado em memória — pronto para download.")
-                except Exception as exc:
-                    st.error(f"Falha ao gerar PDF: {exc}")
-                    st.code(traceback.format_exc())
+                    st.success("PDF gerado — pronto para download.")
+                except Exception:
+                    st.error("Não foi possível gerar o PDF. Tente novamente em instantes.")
 
             # Botão de download direto (se já gerado)
             if st.session_state.pdf_buffer is not None:
@@ -1333,90 +1204,53 @@ def main():
                     type="primary",
                 )
             else:
-                st.caption("Clique em **Gerar PDF em Memória** para habilitar o download. O arquivo nunca toca disco — todo o fluxo usa `BytesIO` (LGPD/stateless).")
+                st.caption("Clique em **Gerar PDF** para habilitar o download.")
 
-        # ---------------- Aba 3 — Status da Infraestrutura ----------------
-        with tab_status:
-            st.markdown("#### ⚙️ Status da Infraestrutura — tempo real")
-            st.caption("Verificação direta de saúde (sem cache) de PostgreSQL/PostGIS e OpenTripPlanner. Fallback é esperado quando os serviços não estão locais.")
-
-            col_db, col_otp = st.columns(2)
-
-            with col_db:
-                st.markdown("**PostgreSQL + PostGIS**")
-                pg = _verificar_postgres()
-                if pg["sucesso"]:
-                    st.success("🟢 **Online** — conexão estabelecida")
-                    if pg["postgis"]:
-                        st.markdown(f"✅ PostGIS ativo — `{pg['versao'][:60] if pg['versao'] else ''}`")
-                    else:
-                        st.warning("🟡 PostGIS não detectado — extensão pode estar ausente")
-                    st.caption(f"Host: `{os.getenv('DB_HOST','localhost')}:{os.getenv('DB_PORT','5432')}` • DB: `{os.getenv('DB_NAME','smartpass')}`")
-                else:
-                    st.error("🔴 **Offline / Fallback**")
-                    st.markdown(f"Detalhe: `{pg.get('erro','indisponível')[:180]}`")
-                    st.info("O app segue operando em modo **fallback** — consultas e rotas usam APIs externas/OSRM sem persistência.")
-
-            with col_otp:
-                st.markdown("**OpenTripPlanner (OTP) — GTFS**")
-                otp = _verificar_otp()
-                if otp["sucesso"]:
-                    st.success("🟢 **Online** — GTFS carregado")
-                    st.caption(f"Endpoint: `{otp['url']}` • HTTP {otp.get('status',200)}")
-                    st.markdown("Roteirização usa **feeds GTFS locais** para linhas reais (ônibus, trem, metrô).")
-                else:
-                    st.warning("🟡 **Modo Fallback ativo**")
-                    st.markdown(f"OTP indisponível: `{otp.get('erro','offline')[:180]}`")
-                    st.caption(f"Endpoint tentado: `{otp['url']}`")
-                    st.info("Fallback: **estimativa provisória** para validação manual pelo RH (sem GTFS).")
-
-            st.divider()
-            # Legenda de indicadores
-            st.markdown(
-                """
-                <div style="display:flex;gap:12px;flex-wrap:wrap;">
-                  <span style="background:#DCFCE7;border:1px solid #BBF7D0;padding:6px 10px;border-radius:999px;font-size:0.85em;">🟢 Online</span>
-                  <span style="background:#FEF9C3;border:1px solid #FDE68A;padding:6px 10px;border-radius:999px;font-size:0.85em;">🟡 Fallback</span>
-                  <span style="background:#FEE2E2;border:1px solid #FECACA;padding:6px 10px;border-radius:999px;font-size:0.85em;">🔴 Offline</span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            if st.button("🔄 Re-verificar agora", width='content'):
-                st.rerun()
-
-            # Batch resultados se houver — espelho do lote com semáforo e filtro visual
-            if st.session_state.batch_resultados:
+            # Exportação individual para portais de benefícios (mantida na aba de relatório)
+            if st.session_state.resultado_vt or st.session_state.resultado_vc:
                 st.divider()
-                st.markdown("##### 📦 Resultado do lote (último processamento)")
-                try:
-                    _df_lote = pd.DataFrame(st.session_state.batch_resultados)
-                    if "nivel_precisao" in _df_lote.columns:
-                        _n_alta = int((_df_lote["nivel_precisao"] == "ALTA").sum())
-                        _n_media = int((_df_lote["nivel_precisao"] == "MEDIA").sum())
-                        _n_baixa = int((_df_lote["nivel_precisao"] == "BAIXA").sum())
-                        _c1, _c2, _c3 = st.columns(3)
-                        _c1.metric("🟢 Exatos", _n_alta)
-                        _c2.metric("🟡 Aproximados", _n_media)
-                        _c3.metric("🔴 Para Revisão", _n_baixa)
-                        _filtrar = st.checkbox("Mostrar apenas endereços que exigem revisão (🟡/🔴)", value=False, key="filtro_revisao_lote_main")
-                        if _filtrar:
-                            _df_exib = _df_lote[_df_lote["nivel_precisao"].isin(["MEDIA", "BAIXA"])]
-                            if _df_exib.empty:
-                                st.info("Nenhum endereço com 🟡/🔴 — todos são 🟢 Exatos.")
-                            else:
-                                st.dataframe(_df_exib, width='stretch')
-                                st.caption(f"Exibindo {len(_df_exib)} de {len(_df_lote)} — filtro 🟡/🔴 ativo.")
+                with st.expander("📤 Exportação individual para portais", expanded=False):
+                    _layout_ind = st.radio(
+                        "Layout de exportação",
+                        options=["Padrão Compra (SPTrans/TOP)", "Rubrica Folha (eSocial/ERP)"],
+                        index=0,
+                        horizontal=True,
+                        key="layout_individual",
+                    )
+                    try:
+                        _valor_ind = float(
+                            st.session_state.resultado_vt.get("custo_diario", 0)
+                            if st.session_state.resultado_vt
+                            else (st.session_state.resultado_vc or {}).get("custo_diario", 0) or 0
+                        )
+                        _dados_ind = [{
+                            "matricula": "0001",
+                            "nome": "Colaborador (simulação)",
+                            "cpf": "12345678900",
+                            "operadora": "SPTrans",
+                            "codigo_linha": "—",
+                            "valor_diario": _valor_ind,
+                            "salario_base": st.session_state.get("salario_base", 0),
+                        }]
+                        _comp_ind = f"{int(st.session_state.get('mes_ref', datetime.now().month)):02d}/{int(st.session_state.get('ano_ref', datetime.now().year))}"
+                        if _layout_ind == "Padrão Compra (SPTrans/TOP)":
+                            _exp_ind = gerar_export_compra(_dados_ind, dias_uteis=int(dias_uteis_atual), competencia=_comp_ind)
                         else:
-                            st.dataframe(_df_lote, width='stretch')
-                    else:
-                        st.dataframe(_df_lote, width='stretch')
-                except Exception:
-                    st.dataframe(pd.DataFrame(st.session_state.batch_resultados), width='stretch')
-
-    # Footer
-    st.divider()
-    st.caption("SmartPass • Stateless & LGPD • PDFs e mapas em BytesIO • Cache: `@st.cache_data` (geocoding/rotas) e `@st.cache_resource` (DB) • Fallback resiliente para OTP/PostGIS")
+                            _exp_ind = gerar_export_rubrica(_dados_ind, dias_uteis=int(dias_uteis_atual), competencia=_comp_ind)
+                        if _exp_ind.get("sucesso"):
+                            st.caption(_exp_ind.get("justificativa", ""))
+                            st.download_button(
+                                "⬇️ Baixar exportação individual (CSV)",
+                                data=_exp_ind["bytesio"].getvalue(),
+                                file_name=_exp_ind["filename"],
+                                mime="text/csv",
+                                width='stretch',
+                                key="download_individual_export",
+                            )
+                        else:
+                            st.warning("Não foi possível gerar a exportação individual.")
+                    except Exception:
+                        st.warning("Exportação individual indisponível para esta simulação.")
 
 
 if __name__ == "__main__":
