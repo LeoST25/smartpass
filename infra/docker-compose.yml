@@ -51,6 +51,55 @@ services:
     networks:
       - smartpass
 
+  # ---------------------------------------------------------------------------
+  # API FastAPI (porta 8000)
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: api
+    image: smartpass:api
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-smartpass}
+      DB_USER: ${DB_USER:-smartpass_user}
+      DB_PASS: ${DB_PASS:-changeme}
+      OTP_GRAPHQL_URL: http://otp:8080/otp/gtfs/v1
+      VT_TARIFA_PADRAO: ${VT_TARIFA_PADRAO:-5.00}
+      SPTRANS_API_TOKEN: ${SPTRANS_API_TOKEN:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173,http://localhost:8080}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      otp:
+        condition: service_healthy
+    networks:
+      - smartpass
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Frontend React (Nginx, porta 8080)
+  # ---------------------------------------------------------------------------
+  web:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    image: smartpass:web
+    ports:
+      - "8080:8080"
+    depends_on:
+      - api
+    networks:
+      - smartpass
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Streamlit UI (legado transitório, porta 8501)
+  # ---------------------------------------------------------------------------
   app:
     build:
       context: ..

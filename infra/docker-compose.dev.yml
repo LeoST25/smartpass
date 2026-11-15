@@ -17,6 +17,32 @@ services:
     networks:
       - smartpass
 
+  # API FastAPI (porta 8000) — dev com hot-reload
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: api
+    image: smartpass:api-dev
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-smartpass}
+      DB_USER: ${DB_USER:-smartpass_user}
+      DB_PASS: ${DB_PASS:-changeme}
+      OTP_GRAPHQL_URL: http://otp:8080/otp/gtfs/v1
+      CORS_ORIGINS: http://localhost:3000,http://localhost:5173,http://localhost:8080
+      DEBUG: "1"
+    volumes:
+      - ../src:/app/src
+    command: ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    ports:
+      - "8000:8000"
+    restart: "no"
+    networks:
+      - smartpass
+
+  # Streamlit UI (legado)
   app:
     build:
       context: ..

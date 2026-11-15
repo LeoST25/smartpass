@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import time
 from datetime import datetime
 
@@ -70,7 +71,7 @@ def health():
         pg = {"ok": False, "postgis_version": None, "latency_ms": None, "erro": str(exc)}
 
     # OTP health (minimal query com timeout curto)
-    otp_url = "http://localhost:8080/otp/gtfs/v1"
+    otp_url = os.getenv("OTP_GRAPHQL_URL", "http://localhost:8080/otp/gtfs/v1")
     otp_latency = None
     t0_otp = time.monotonic()
     try:
@@ -243,8 +244,6 @@ def routes_calculate(req: RouteCalculateRequest):
                 viabilidade_clt = analisar_viabilidade_clt(float(custo_mensal), float(req.salario_base))
             except Exception:
                 viabilidade_clt = None
-
-        # 6. Memória consolidada (sem vazar nomes de exceções)
         memoria_final = list(memoria_cal)
         if resultado_vt and resultado_vt.get("memoria_calculo"):
             memoria_final.extend(resultado_vt["memoria_calculo"])
@@ -269,6 +268,7 @@ def routes_calculate(req: RouteCalculateRequest):
             vt=resultado_vt,
             vc=resultado_vc,
             comparativo=comparativo,
+            viabilidade_clt=viabilidade_clt,
             coords=coords,
             origem_label=endereco_origem,
             destino_label=endereco_destino,

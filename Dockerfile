@@ -9,6 +9,24 @@ FROM base AS builder
 COPY requirements.txt ./
 RUN pip install --prefix=/usr/local --no-cache-dir -r requirements.txt
 
+# -----------------------------------------------------------------------------
+# Stage: API (FastAPI + Uvicorn)
+# -----------------------------------------------------------------------------
+FROM base AS api
+COPY --from=builder /usr/local /usr/local
+RUN useradd -m -u 10001 appuser
+COPY src ./src
+COPY requirements.txt ./
+RUN chown -R appuser:appuser /app
+USER appuser
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=20s \
+  CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# -----------------------------------------------------------------------------
+# Stage: Streamlit UI (legacy, transitório até substituição pelo frontend React)
+# -----------------------------------------------------------------------------
 FROM base AS production
 COPY --from=builder /usr/local /usr/local
 # Criar usuário não-root

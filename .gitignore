@@ -11,3 +11,10 @@ infra/otp-data/*.zip
 infra/otp-data/graphs/
 opencode.json
 .playwright-mcp/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
