@@ -13,7 +13,7 @@ from src.services.benefit_calculator import analisar_viabilidade_clt, parse_sala
 from src.services.calendar_engine import calcular_dias_uteis
 from src.services.export_formatter import gerar_export_compra, gerar_export_rubrica
 from src.services.geocoding import buscar_coordenadas_por_cep_ou_endereco, sugerir_enderecos
-from src.services.map_generator import gerar_imagem_mapa_rota
+from src.services.map_generator import gerar_imagem_mapa_rota, gerar_mapa_interativo
 from src.services.pdf_generator import gerar_pdf_evidencia
 from src.services.routing import (
     calcular_vale_combustivel,
@@ -29,6 +29,14 @@ try:
 except Exception:  # pragma: no cover - fallback defensivo de ambiente
     st_searchbox = None
     _SEARCHBOX_DISPONIVEL = False
+
+try:
+    from streamlit_folium import st_folium
+
+    _FOLIUM_DISPONIVEL = True
+except Exception:  # pragma: no cover - fallback defensivo de ambiente
+    st_folium = None
+    _FOLIUM_DISPONIVEL = False
 
 
 
@@ -239,6 +247,23 @@ def _format_tempo(minutos: int) -> str:
     if h == 0:
         return f"{m} min"
     return f"{h}h {m}min"
+
+
+def _rota_para_mapa() -> dict | None:
+    """Seleciona a rota de referência para o mapa (comparativo → VT → vazio).
+
+    Returns:
+        dict | None: Resultado de roteirização com ``legs`` para renderização
+        cartográfica, ou ``None`` quando não há rota disponível.
+    """
+    comparativo = st.session_state.get("comparativo")
+    if comparativo and comparativo.get("sucesso"):
+        selecao = st.session_state.get("rota_selecionada", "economica")
+        if selecao == "economica" and comparativo.get("rota_mais_economica"):
+            return comparativo["rota_mais_economica"]
+        if comparativo.get("rota_mais_rapida"):
+            return comparativo["rota_mais_rapida"]
+    return st.session_state.get("resultado_vt")
 
 
 def _df_lote_para_exibicao(df: pd.DataFrame) -> pd.DataFrame:
@@ -879,14 +904,52 @@ def main():
 
         # ---------------- Aba 1 — Itinerário Detalhado ----------------
         with tab_mapa:
-            st.markdown("#### Itinerário Detalhado")
+            st.markdown("#### Mapa & Itinerário")
             coords = st.session_state.coords
-            # Mapa estático em largura total
+            rota_mapa = _rota_para_mapa() or {}
+            # Mapa interativo urbano em largura total (altura confortável)
             if coords and len(coords) == 4:
-                try:
-                    img_buf = gerar_imagem_mapa_rota(*coords)
-                    st.image(img_buf, caption=f"Trajeto: {st.session_state.origem_label} → {st.session_state.destino_label}", width="stretch")
-                except Exception:
+                mapa_renderizado = False
+                if _FOLIUM_DISPONIVEL:
+                    try:
+                        mapa = gerar_mapa_interativo(
+                            rota_mapa,
+                            st.session_state.origem_label or "Origem",
+                            st.session_state.destino_label or "Destino",
+                        )
+                        if mapa is not None:
+                            # `use_container_width` ocupa 100% do container;
+                            # `height` em pixels define a altura (~480px).
+                            st_folium(
+                                mapa,
+                                use_container_width=True,
+                                height=480,
+                                returned_objects=[],
+                            )
+                            mapa_renderizado = True
+                    except Exception:
+                        mapa_renderizado = False
+
+                if not mapa_renderizado:
+                    # Fallback estático (mapa em PNG) — nunca deixa a aba vazia
+                    try:
+                        img_buf = gerar_imagem_mapa_rota(*coords, rota_dados=rota_mapa)
+                        st.image(
+                            img_buf,
+                            caption=f"Trajeto: {st.session_state.origem_label} → {st.session_state.destino_label}",
+                            alt="Mapa do trajeto da rota",
+                            width="stretch",
+                        )
+                        mapa_renderizado = True
+                    except Exception:
+                        mapa_renderizado = False
+
+                if mapa_renderizado:
+                    st.caption(
+                        "Casa (origem) · Parada (baldeação) · Empresa (destino) — "
+                        "cinza pontilhado: caminhada · azul: ônibus · roxo: metrô · vermelho: trem"
+                    )
+                else:
                     st.warning("Não foi possível exibir o mapa deste trajeto.")
             else:
                 st.info("Mapa indisponível para este trajeto.")
@@ -1130,6 +1193,15 @@ def main():
                         "custo_mensal": vt.get("custo_mensal",0) if vt else 0,
                         "distancia_km": vt.get("distancia_km",0) if vt else 0,
                     }
+
+            # --- Geometria real da rota para o mapa do PDF (por modal) ---
+            _legs_pdf = None
+            if isinstance(rota_sel, dict) and rota_sel.get("legs"):
+                _legs_pdf = rota_sel.get("legs")
+            elif isinstance(vt, dict) and vt.get("legs"):
+                _legs_pdf = vt.get("legs")
+            if _legs_pdf:
+                dados_calc["legs"] = _legs_pdf
 
             # --- Trilha auditável comum ao PDF: calendário e precisão geográfica ---
             _memoria_auditoria = list(dados_calc.get("memoria_calculo") or [])
