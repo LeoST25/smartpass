@@ -168,28 +168,40 @@ def _verificar_otp():
         return {"sucesso": False, "url": url, "erro": str(exc)}
 
 
-def _recalcular_vt_com_parametros(resultado_vt: dict, tarifa: float, dias_uteis: int) -> dict:
-    """Recalcula custo VT com tarifa e dias úteis informados pelo usuário."""
+def _recalcular_vt_com_parametros(resultado_vt: dict, tarifa: float | None, dias_uteis: int) -> dict:
+    """Recalcula custo VT com tarifa override quando informado (compat legada).
+
+    Se tarifa é None ou 0, mantém tarifas oficiais por linha/operadora (catálogo RMSP + GTFS).
+    Quando tarifa >0, aplica override RH (convênio) com trilha auditável.
+    """
     if not resultado_vt or not resultado_vt.get("sucesso"):
         return resultado_vt
+    # Sem override: preserva tarifas oficiais do motor (fare_engine/transit_api)
+    if tarifa is None or float(tarifa) <= 0:
+        # apenas ajusta mensal pelos dias úteis reais sem sobrescrever tarifa
+        if dias_uteis and resultado_vt.get("custo_diario") is not None:
+            novo = dict(resultado_vt)
+            novo["custo_mensal"] = round(float(resultado_vt["custo_diario"]) * int(dias_uteis), 2)
+            novo["dias_uteis"] = int(dias_uteis)
+            return novo
+        return resultado_vt
     linhas = resultado_vt.get("detalhes") or []
-    # Se não há detalhes (fallback vazio), cria linha única com tarifa
     if not linhas:
-        linhas_src = resultado_vt.get("linhas") or [{"linha": "Transporte público", "valor_unitario": tarifa, "quantidade_dia": 2}]
+        linhas_src = resultado_vt.get("linhas") or [{"linha": "Transporte público", "valor_unitario": float(tarifa), "quantidade_dia": 2}]
     else:
-        linhas_src = [{"linha": d.get("linha", "Linha"), "valor_unitario": tarifa, "quantidade_dia": d.get("quantidade_dia", 2)} for d in linhas]
+        linhas_src = [{"linha": d.get("linha", "Linha"), "valor_unitario": float(tarifa), "quantidade_dia": d.get("quantidade_dia", 2)} for d in linhas]
 
     recalc = calcular_vale_transporte(linhas_src)
-    # Ajusta mensal pelos dias úteis reais
     recalc["custo_mensal"] = round(recalc["custo_diario"] * dias_uteis, 2)
-    # Mantém demais campos
     novo = {**resultado_vt, **recalc}
-    # Atualiza detalhes com nova tarifa
     novo["detalhes"] = recalc["detalhes"]
+    # trilha auditável do override
+    novo["override_tarifa"] = float(tarifa)
+    novo["memoria_calculo"] = (resultado_vt.get("memoria_calculo") or []) + [f"Override RH: tarifa unitária R$ {float(tarifa):.2f} aplicada a todos os trechos (convênio)"]
     return novo
 
 
-def _processar_calculo(origem_txt, destino_txt, modalidade, dias_uteis, tarifa, valor_km):
+def _processar_calculo(origem_txt, destino_txt, modalidade, dias_uteis, tarifa_override, valor_km):
     """Executa geocodificação + roteirização conforme modalidade."""
     # Geocodificação (cacheada)
     res_geo_origem = buscar_coordenadas_por_cep_ou_endereco(origem_txt)
@@ -213,8 +225,8 @@ def _processar_calculo(origem_txt, destino_txt, modalidade, dias_uteis, tarifa, 
 
     if modalidade in ("Vale-Transporte", "Comparativo Completo"):
         vt_raw = roteirizar_vale_transporte_automatico(lat_o, lon_o, lat_d, lon_d, endereco_origem, endereco_destino)
-        # Recalcula com parâmetros do usuário
-        resultado_vt = _recalcular_vt_com_parametros(vt_raw, tarifa, dias_uteis)
+        # Só recalcula se houver override RH; caso contrário preserva tarifa oficial por linha
+        resultado_vt = _recalcular_vt_com_parametros(vt_raw, tarifa_override, dias_uteis)
         # Motor fare_engine: comparativo econômica vs rápida (com integração temporal)
         try:
             comp_raw = roteirizar_com_comparativo(lat_o, lon_o, lat_d, lon_d, dias_uteis=int(dias_uteis))
@@ -365,17 +377,20 @@ def main():
                 pass
             c1, c2 = st.columns(2)
             with c1:
-                # mantém compatibilidade: dias_input agora é derivado mas ainda exibido como fallback se calendário falhar
                 dias_input_hidden = st.number_input("Dias úteis (fallback)", min_value=1, max_value=31, value=int(st.session_state.dias_uteis), step=1, help="Usado apenas se calendário falhar. Normalmente use o override acima.")
-                dias_input = dias_input_hidden  # compatibilidade com lógica legada (será sobrescrito pelo calendário após submit)
+                dias_input = dias_input_hidden
             with c2:
+                st.caption("Tarifa oficial por linha/operadora aplicada automaticamente via catálogo RMSP + GTFS.")
+            # Override opcional (avançado) — fora do fluxo obrigatório
+            with st.expander("⚙️ Tarifa diferenciada / convênio (opcional)", expanded=False):
+                st.caption("Deixe 0 para usar tarifas oficiais por linha (recomendado). Informe valor apenas se o RH tiver convênio/tarifa diferenciada.")
                 tarifa_input = st.number_input(
-                    "Tarifa unitária / Integração (R$)",
+                    "Override tarifa unitária (R$) — 0 = oficial",
                     min_value=0.0,
-                    value=float(st.session_state.tarifa),
+                    value=float(st.session_state.get("tarifa", 0.0) or 0.0),
                     step=0.10,
                     format="%.2f",
-                    help="Usada para recalcular VT quando OTP retorna tarifa padrão.",
+                    help="Quando >0, sobrescreve todas as tarifas oficiais com trilha auditável. 0 mantém catálogo RMSP.",
                 )
             valor_km_input = st.number_input(
                 "Valor por KM — Vale-Combustível (R$)",
@@ -479,7 +494,8 @@ def main():
                                 vt = roteirizar_vale_transporte_automatico(
                                     res_geo_o["lat"], res_geo_o["lon"], res_geo_d["lat"], res_geo_d["lon"], str(origem_lote), str(destino_lote)
                                 )
-                                vt_adj = _recalcular_vt_com_parametros(vt, float(tarifa_input), int(dias_input))
+                                _tarifa_lote = float(tarifa_input) if float(tarifa_input) > 0 else None
+                                vt_adj = _recalcular_vt_com_parametros(vt, _tarifa_lote, int(dias_input))
                                 custo_m = vt_adj.get("custo_mensal", 0) or 0
                                 viab_lote = analisar_viabilidade_clt(float(custo_m), salario_lote)
                                 # status em caixa alta conforme ajuste #2
@@ -654,12 +670,13 @@ def main():
                 _cal = {"sucesso": False, "dias_uteis": dias_efetivos, "memoria_calculo": memoria_cal, "justificativa": "Fallback."}
             with st.spinner("🔎 Geocodificando endereços e roteirizando via OTP/OSRM…"):
                 try:
+                    tarifa_override = float(tarifa_input) if float(tarifa_input) > 0 else None
                     payload, coords, origem_label, destino_label, geos = _processar_calculo(
                         origem_input.strip(),
                         destino_input.strip(),
                         modalidade_input,
                         int(dias_efetivos),
-                        float(tarifa_input),
+                        tarifa_override,
                         float(valor_km_input),
                     )
                     if not payload.get("sucesso"):
@@ -974,14 +991,25 @@ def main():
                     st.info(vt["resumo_trajeto"])
                 detalhes = vt.get("detalhes") or []
                 if detalhes:
-                    # Tabela + baldeações
                     df_det = pd.DataFrame(detalhes)
-                    # Normaliza colunas para exibição
-                    col_map = {"linha": "Linha / Modal", "valor_unitario": "Tarifa (R$)", "quantidade_dia": "Qtd/dia", "subtotal": "Subtotal (R$)"}
+                    col_map = {"linha": "Linha / Modal", "codigo_linha": "Código", "operadora": "Operadora", "valor_unitario": "Tarifa (R$)", "quantidade_dia": "Qtd/dia", "subtotal": "Subtotal (R$)", "fonte": "Fonte", "tarifa_confirmada": "Confirmada"}
+                    # garante colunas mesmo quando legado
+                    for c in ["codigo_linha", "operadora", "fonte", "tarifa_confirmada"]:
+                        if c not in df_det.columns:
+                            df_det[c] = "—" if c != "tarifa_confirmada" else True
+                    # formata confirmada como ícone
+                    df_det["tarifa_confirmada"] = df_det["tarifa_confirmada"].map(lambda x: "✅" if x else "⚠️ A confirmar")
                     df_show = df_det.rename(columns=col_map)
+                    # ordena colunas na ordem canônica
+                    ordem = ["Linha / Modal", "Código", "Operadora", "Tarifa (R$)", "Qtd/dia", "Subtotal (R$)", "Fonte", "Confirmada"]
+                    df_show = df_show[[c for c in ordem if c in df_show.columns]]
                     st.dataframe(df_show, width='stretch', hide_index=True)
+                    # alertas de tarifas não confirmadas
+                    pend = [d for d in detalhes if not d.get("tarifa_confirmada")]
+                    if pend:
+                        st.warning(f"⚠️ {len(pend)} linha(s) com tarifa estimada — confirmar valor oficial: " + ", ".join([f"{d.get('codigo_linha') or d.get('linha')} ({d.get('operadora')})" for d in pend]))
                     bal = max(len(detalhes) - 1, 0)
-                    st.caption(f"**{len(detalhes)}** trecho(s) • **{bal}** baldeação(ões) • Fonte: **{vt.get('fonte','—')}**")
+                    st.caption(f"**{len(detalhes)}** trecho(s) • **{bal}** baldeação(ões) • Fonte roteirização: **{vt.get('fonte','—')}** • Catálogo: **{vt.get('catalogo_versao') or '—'}**")
                     # Linha de integração destacada
                     if bal > 0:
                         st.markdown(f"🔄 **Integração:** {bal} baldeação(ões) sugerida(s) — valide com o colaborador.")
