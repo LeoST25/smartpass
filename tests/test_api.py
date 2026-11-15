@@ -109,6 +109,28 @@ def test_health_down_both_offline(client):
     assert data["otp"]["ok"] is False
 
 
+def test_health_otp_respeita_env_var(monkeypatch, client):
+    """GET /health usa OTP_GRAPHQL_URL do ambiente (Docker-friendly)."""
+    monkeypatch.setenv("OTP_GRAPHQL_URL", "http://otp:8080/otp/gtfs/v1")
+    captured_url = {}
+
+    with patch("src.database.connection.check_db_health", return_value={"ok": True, "postgis_version": "3.3.0", "latency_ms": 5.0, "erro": None}), patch("src.api.routes.requests.post") as mock_post:
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": {"_service": {"name": "otp"}}}
+
+        def _capture(url, *args, **kwargs):
+            captured_url["url"] = url
+            return mock_resp
+
+        mock_post.side_effect = _capture
+
+        resp = client.get("/api/v1/health")
+
+    assert resp.status_code == 200
+    assert captured_url["url"] == "http://otp:8080/otp/gtfs/v1"
+
+
 # -----------------------------------------------------------------------------
 # Geocoding Autocomplete
 # -----------------------------------------------------------------------------
@@ -222,6 +244,51 @@ def test_routes_calculate_vt_sucesso(client):
     assert "memoria_calculo" in data
     assert len(data["memoria_calculo"]) > 0
     assert "coords" in data
+
+
+def test_routes_calculate_viabilidade_clt_com_salario(client):
+    """POST /routes/calculate com salario_base > 0 expõe viabilidade_clt."""
+    with patch("src.api.routes.buscar_coordenadas_por_cep_ou_endereco", side_effect=_mock_geocoding()), patch("src.api.routes.roteirizar_vale_transporte_automatico", side_effect=_mock_vt()), patch("src.api.routes.roteirizar_com_comparativo", return_value={"sucesso": False}):
+        payload = {
+            "origem": "06310-000",
+            "destino": "Avenida Paulista, 1000",
+            "modalidade": "Vale-Transporte",
+            "dias_uteis": 22,
+            "salario_base": 2500.00,
+        }
+        resp = client.post("/api/v1/routes/calculate", json=payload)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["sucesso"] is True
+    assert data["viabilidade_clt"] is not None
+    assert data["viabilidade_clt"]["sucesso"] is True
+    assert "teto_desconto_6_pct" in data["viabilidade_clt"]
+    assert "desconto_colaborador" in data["viabilidade_clt"]
+    assert "custeio_empresa" in data["viabilidade_clt"]
+    assert "vt_vantajoso" in data["viabilidade_clt"]
+    # Custo mensal mock = 193.60, teto 6% de 2500 = 150.00
+    assert data["viabilidade_clt"]["teto_desconto_6_pct"] == 150.00
+    assert data["viabilidade_clt"]["desconto_colaborador"] == 150.00
+    assert data["viabilidade_clt"]["custeio_empresa"] == 43.60
+    assert data["viabilidade_clt"]["vt_vantajoso"] is True
+
+
+def test_routes_calculate_viabilidade_clt_sem_salario(client):
+    """POST /routes/calculate sem salario_base retorna viabilidade_clt = None."""
+    with patch("src.api.routes.buscar_coordenadas_por_cep_ou_endereco", side_effect=_mock_geocoding()), patch("src.api.routes.roteirizar_vale_transporte_automatico", side_effect=_mock_vt()), patch("src.api.routes.roteirizar_com_comparativo", return_value={"sucesso": False}):
+        payload = {
+            "origem": "06310-000",
+            "destino": "Avenida Paulista, 1000",
+            "modalidade": "Vale-Transporte",
+            "dias_uteis": 22,
+        }
+        resp = client.post("/api/v1/routes/calculate", json=payload)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["sucesso"] is True
+    assert data["viabilidade_clt"] is None
 
 
 def test_routes_calculate_comparativo_completo(client):

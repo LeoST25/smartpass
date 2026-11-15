@@ -69,6 +69,13 @@ class RouteCalculateResponse(BaseModel):
     vt: Optional[dict[str, Any]] = Field(None, description="Resultado Vale-Transporte completo")
     vc: Optional[dict[str, Any]] = Field(None, description="Resultado Vale-Combustível completo")
     comparativo: Optional[dict[str, Any]] = Field(None, description="Comparativo rápida vs econômica")
+    viabilidade_clt: Optional[dict[str, Any]] = Field(
+        None,
+        description=(
+            "Análise CLT 6% (Lei 7.418/85) quando salario_base > 0. Contém teto_desconto_6_pct, "
+            "desconto_colaborador, custeio_empresa, vt_vantajoso, recomendacao, memoria_calculo e justificativa."
+        ),
+    )
     coords: Optional[tuple[float, float, float, float]] = Field(None, description="Coordenadas (lat_o, lon_o, lat_d, lon_d)")
     origem_label: Optional[str] = Field(None, description="Endereço de origem formatado")
     destino_label: Optional[str] = Field(None, description="Endereço de destino formatado")
