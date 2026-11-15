@@ -387,7 +387,7 @@ def main():
                             origem_lote = row.get("origem") or row.get("endereco") or row.get("cep_origem") or row.get("residencia")
                             destino_lote = row.get("destino") or row.get("empresa") or row.get("cep_destino") or row.get("unidade")
                             if pd.isna(origem_lote) or pd.isna(destino_lote):
-                                resultados_lote.append({"linha": idx + 1, "origem": str(origem_lote), "destino": str(destino_lote), "erro": "Origem/Destino ausente"})
+                                resultados_lote.append({"linha": idx + 1, "origem": str(origem_lote), "destino": str(destino_lote), "erro": "Origem/Destino ausente", "nivel_precisao": "BAIXA", "semaforo": "🔴 Revisar Endereço", "motivo_precisao": "Origem/Destino ausente — revisão obrigatória"})
                                 continue
                             # Detecta salario_base opcional (aliases + sanitização BR)
                             salario_raw_lote = None
@@ -401,8 +401,22 @@ def main():
                                 res_geo_o = buscar_coordenadas_por_cep_ou_endereco(str(origem_lote))
                                 res_geo_d = buscar_coordenadas_por_cep_ou_endereco(str(destino_lote))
                                 if not res_geo_o.get("sucesso") or not res_geo_d.get("sucesso"):
-                                    resultados_lote.append({"linha": idx + 1, "origem": str(origem_lote), "destino": str(destino_lote), "erro": "Geocodificação falhou"})
+                                    # Geocodificação falhou — marca como BAIXA para revisão
+                                    nivel_falha = "BAIXA"
+                                    # tenta extrair motivo de quem falhou
+                                    motivo_falha = res_geo_o.get("erro") if not res_geo_o.get("sucesso") else res_geo_d.get("erro", "Geocodificação falhou")
+                                    resultados_lote.append({"linha": idx + 1, "origem": str(origem_lote), "destino": str(destino_lote), "erro": "Geocodificação falhou", "nivel_precisao": nivel_falha, "semaforo": "🔴 Revisar Endereço", "motivo_precisao": str(motivo_falha)[:180]})
                                     continue
+                                # Semáforo: pior nível entre origem e destino (BAIXA > MEDIA > ALTA)
+                                _ordem = {"BAIXA": 3, "MEDIA": 2, "ALTA": 1}
+                                nivel_o = res_geo_o.get("nivel_precisao", "MEDIA")
+                                nivel_d = res_geo_d.get("nivel_precisao", "MEDIA")
+                                nivel_lote = nivel_o if _ordem.get(nivel_o, 0) >= _ordem.get(nivel_d, 0) else nivel_d
+                                semaforo_lote = res_geo_o.get("semaforo") if nivel_lote == nivel_o else res_geo_d.get("semaforo")
+                                # Motivo combinado para auditoria
+                                motivo_o = res_geo_o.get("motivo_precisao", "")
+                                motivo_d = res_geo_d.get("motivo_precisao", "")
+                                motivo_lote = f"Origem: {motivo_o} | Destino: {motivo_d}" if motivo_o or motivo_d else ""
                                 vt = roteirizar_vale_transporte_automatico(
                                     res_geo_o["lat"], res_geo_o["lon"], res_geo_d["lat"], res_geo_d["lon"], str(origem_lote), str(destino_lote)
                                 )
@@ -428,16 +442,37 @@ def main():
                                     "desconto_colaborador": viab_lote.get("desconto_colaborador", 0.0),
                                     "subsidio_empresa": viab_lote.get("custeio_empresa", 0.0),
                                     "status_viabilidade_clt": status_clt,
+                                    "nivel_precisao": nivel_lote,
+                                    "semaforo": semaforo_lote,
+                                    "motivo_precisao": motivo_lote,
                                 })
                             except Exception as exc:
-                                resultados_lote.append({"linha": idx + 1, "origem": str(origem_lote), "destino": str(destino_lote), "erro": str(exc)})
+                                resultados_lote.append({"linha": idx + 1, "origem": str(origem_lote), "destino": str(destino_lote), "erro": str(exc), "nivel_precisao": "BAIXA", "semaforo": "🔴 Revisar Endereço", "motivo_precisao": str(exc)[:180]})
                             progresso.progress(int(((idx + 1) / len(df)) * 100))
 
                         st.session_state.batch_resultados = resultados_lote
                         if resultados_lote:
                             df_res = pd.DataFrame(resultados_lote)
-                            st.dataframe(df_res, width='stretch', height=260)
-                            # Download em memória
+                            # Contadores semáforo no topo do resultado do lote
+                            n_alta = int((df_res["nivel_precisao"] == "ALTA").sum()) if "nivel_precisao" in df_res.columns else 0
+                            n_media = int((df_res["nivel_precisao"] == "MEDIA").sum()) if "nivel_precisao" in df_res.columns else 0
+                            n_baixa = int((df_res["nivel_precisao"] == "BAIXA").sum()) if "nivel_precisao" in df_res.columns else 0
+                            c1, c2, c3 = st.columns(3)
+                            c1.metric("🟢 Exatos", n_alta, help="ALTA — logradouro + número/CEP específico")
+                            c2.metric("🟡 Aproximados", n_media, help="MEDIA — apenas logradouro sem número ou bairro")
+                            c3.metric("🔴 Para Revisão", n_baixa, help="BAIXA — fallback centro do município / erro de geocodificação")
+                            # Filtro rápido visual (não afeta CSV completo)
+                            filtrar_revisao = st.checkbox("Mostrar apenas endereços que exigem revisão (🟡/🔴)", value=False, key="filtro_revisao_lote")
+                            if filtrar_revisao:
+                                df_exib = df_res[df_res["nivel_precisao"].isin(["MEDIA", "BAIXA"])] if "nivel_precisao" in df_res.columns else df_res
+                                if df_exib.empty:
+                                    st.info("Nenhum endereço com 🟡/🔴 — todos são 🟢 Exatos.")
+                                else:
+                                    st.dataframe(df_exib, width='stretch', height=260)
+                                    st.caption(f"Exibindo {len(df_exib)} de {len(df_res)} — filtro 🟡/🔴 ativo. O CSV abaixo exporta o lote **completo** ({len(df_res)} linhas).")
+                            else:
+                                st.dataframe(df_res, width='stretch', height=260)
+                            # Download em memória — sempre lote completo com nivel_precisao/semaforo/motivo_precisao
                             csv_buf = io.StringIO()
                             df_res.to_csv(csv_buf, index=False)
                             st.download_button(
@@ -466,7 +501,7 @@ def main():
                     mime="text/csv",
                     width='stretch',
                 )
-                st.caption("Colunas obrigatórias: **origem**, **destino**. Opcional: **nome**, **salario_base** (ex: 2500.00 ou R$ 2.500,00). Saída inclui **teto_6_pct, desconto_colaborador, subsidio_empresa, status_viabilidade_clt**.")
+                st.caption("Colunas obrigatórias: **origem**, **destino**. Opcional: **nome**, **salario_base** (ex: 2500.00 ou R$ 2.500,00). Saída inclui **teto_6_pct, desconto_colaborador, subsidio_empresa, status_viabilidade_clt, nivel_precisao, semaforo, motivo_precisao**.")
 
         st.divider()
         st.caption("🔒 **LGPD / Stateless:** nenhum dado persiste em banco. PDFs e mapas são gerados em `BytesIO` e mantidos apenas em `st.session_state`.")
@@ -1025,11 +1060,34 @@ def main():
             if st.button("🔄 Re-verificar agora", width='content'):
                 st.rerun()
 
-            # Batch resultados se houver
+            # Batch resultados se houver — espelho do lote com semáforo e filtro visual
             if st.session_state.batch_resultados:
                 st.divider()
                 st.markdown("##### 📦 Resultado do lote (último processamento)")
-                st.dataframe(pd.DataFrame(st.session_state.batch_resultados), width='stretch')
+                try:
+                    _df_lote = pd.DataFrame(st.session_state.batch_resultados)
+                    if "nivel_precisao" in _df_lote.columns:
+                        _n_alta = int((_df_lote["nivel_precisao"] == "ALTA").sum())
+                        _n_media = int((_df_lote["nivel_precisao"] == "MEDIA").sum())
+                        _n_baixa = int((_df_lote["nivel_precisao"] == "BAIXA").sum())
+                        _c1, _c2, _c3 = st.columns(3)
+                        _c1.metric("🟢 Exatos", _n_alta)
+                        _c2.metric("🟡 Aproximados", _n_media)
+                        _c3.metric("🔴 Para Revisão", _n_baixa)
+                        _filtrar = st.checkbox("Mostrar apenas endereços que exigem revisão (🟡/🔴)", value=False, key="filtro_revisao_lote_main")
+                        if _filtrar:
+                            _df_exib = _df_lote[_df_lote["nivel_precisao"].isin(["MEDIA", "BAIXA"])]
+                            if _df_exib.empty:
+                                st.info("Nenhum endereço com 🟡/🔴 — todos são 🟢 Exatos.")
+                            else:
+                                st.dataframe(_df_exib, width='stretch')
+                                st.caption(f"Exibindo {len(_df_exib)} de {len(_df_lote)} — filtro 🟡/🔴 ativo.")
+                        else:
+                            st.dataframe(_df_lote, width='stretch')
+                    else:
+                        st.dataframe(_df_lote, width='stretch')
+                except Exception:
+                    st.dataframe(pd.DataFrame(st.session_state.batch_resultados), width='stretch')
 
     # Footer
     st.divider()
