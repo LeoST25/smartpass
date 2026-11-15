@@ -40,7 +40,7 @@ def calcular_vale_combustivel(origem_lat, origem_lon, destino_lat, destino_lon, 
 def roteirizar_vale_transporte_automatico(
     origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem="Origem não informada", endereco_destino="Destino não informado"
 ):
-    """Usa OpenTripPlanner como motor principal de VT e estimativa em contingência."""
+    """Usa OpenTripPlanner como motor principal de VT com tarifa oficial por linha; fallback contingência."""
     distancia_fallback = _distancia_rodoviaria_km(origem_lat, origem_lon, destino_lat, destino_lon)
     resposta = consultar_linhas_transporte_oficial(
         origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem, endereco_destino
@@ -52,17 +52,57 @@ def roteirizar_vale_transporte_automatico(
         itinerario["fonte"] = resposta.get("fonte", "Estimativa de contingência")
         itinerario["aviso"] = resposta.get("erro", "Serviço de roteirização indisponível.")
 
-    resultado = calcular_vale_transporte(itinerario["linhas"])
-    resultado.update(
-        {
-            "sucesso": True,
-            "distancia_km": itinerario["distancia_km"],
-            "resumo_trajeto": itinerario["resumo_trajeto"],
-            "fonte": itinerario["fonte"],
-        }
-    )
+    # Tenta motor oficial com integração BU/TOP quando legs enriquecidos existem
+    legs = itinerario.get("legs_transito") or itinerario.get("legs") or []
+    resultado = None
+    if legs:
+        try:
+            from src.services.fare_engine import calcular_custo_com_integracao
+
+            res_oficial = calcular_custo_com_integracao(legs, dias_uteis=22)
+            if res_oficial.get("sucesso"):
+                resultado = {
+                    "sucesso": True,
+                    "custo_diario": res_oficial["custo_diario"],
+                    "custo_mensal": res_oficial["custo_mensal"],
+                    "custo_trecho": res_oficial["custo_trecho"],
+                    "detalhes": res_oficial["detalhes"],
+                    "detalhamento_tarifario": res_oficial["detalhamento_tarifario"],
+                    "memoria_calculo": res_oficial["memoria_calculo"],
+                    "justificativa": res_oficial["justificativa"],
+                    "alertas_tarifa": res_oficial.get("alertas_tarifa", []),
+                    "catalogo_versao": res_oficial.get("catalogo_versao"),
+                }
+        except Exception:
+            resultado = None
+    if resultado is None:
+        # fallback compatível (soma simples)
+        resultado = calcular_vale_transporte(itinerario["linhas"])
+        resultado.update(
+            {
+                "sucesso": True,
+                "distancia_km": itinerario["distancia_km"],
+                "resumo_trajeto": itinerario["resumo_trajeto"],
+                "fonte": itinerario["fonte"],
+            }
+        )
+    else:
+        # completa campos de roteirização
+        resultado.update(
+            {
+                "sucesso": True,
+                "distancia_km": itinerario["distancia_km"],
+                "resumo_trajeto": itinerario["resumo_trajeto"],
+                "fonte": itinerario["fonte"],
+                "linhas": itinerario.get("linhas", []),
+                "legs": itinerario.get("legs", []),
+                "legs_transito": itinerario.get("legs_transito", []),
+            }
+        )
     if "aviso" in itinerario:
         resultado["aviso"] = itinerario["aviso"]
+    if "fare_cents" in itinerario:
+        resultado["fare_cents"] = itinerario["fare_cents"]
     return resultado
 
 

@@ -1,4 +1,9 @@
-"""Roteamento de transporte público via OpenTripPlanner (OTP)."""
+"""Roteamento de transporte público via OpenTripPlanner (OTP).
+
+Extração rica por leg: mode, distance, duration, from{ name lat lon }, to{ name lat lon },
+route{ gtfsId shortName longName agency{ gtfsId name } } e fare do itinerário quando disponível.
+Timeout 10s conforme gis-routing-otp/SKILL.md e fallback LGPD stateless.
+"""
 
 import os
 from datetime import datetime
@@ -16,7 +21,7 @@ TIMEZONE_RMSP = ZoneInfo("America/Sao_Paulo")
 
 
 def _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon):
-    """Monta a consulta GraphQL compatível com OTP 2.7+."""
+    """Monta a consulta GraphQL compatível com OTP 2.7+ — extração rica."""
     data_hora = datetime.now(TIMEZONE_RMSP).isoformat(timespec="minutes")
     return f"""
     {{
@@ -35,10 +40,12 @@ def _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon):
             legs {{
               mode
               distance
-              from {{ name }}
-              to {{ name }}
-              route {{ shortName longName }}
+              duration
+              from {{ name lat lon }}
+              to {{ name lat lon }}
+              route {{ gtfsId shortName longName agency {{ gtfsId name }} }}
             }}
+            fare {{ regular {{ cents }} }}
           }}
         }}
       }}
@@ -56,18 +63,64 @@ def _nome_linha(leg):
     return f"{modo} {curto or longo}".strip()
 
 
+def _codigo_linha(leg: dict) -> str:
+    """Extrai código curto da linha (shortName ou gtfsId)."""
+    rota = leg.get("route") or {}
+    for k in ("shortName", "gtfsId", "longName"):
+        v = (rota.get(k) or "").strip()
+        if v:
+            # gtfsId vem como "agency:123" — pega sufixo
+            if ":" in v and k == "gtfsId":
+                v = v.split(":")[-1].strip()
+            return v
+    return (leg.get("linha") or "").strip()
+
+
+def _agencia_leg(leg: dict) -> dict:
+    """Retorna dict agency normalizado { gtfsId, name } ou vazio."""
+    rota = leg.get("route") or {}
+    agency = rota.get("agency") or {}
+    return {
+        "gtfsId": (agency.get("gtfsId") or "").strip(),
+        "name": (agency.get("name") or "").strip(),
+    }
+
+
+def _enriquecer_leg(leg: dict) -> dict:
+    """Enriquece leg com campos canônicos para fare_engine (não muta original)."""
+    enriched = dict(leg)
+    agencia = _agencia_leg(leg)
+    enriched["agency"] = agencia
+    enriched["codigo_linha"] = _codigo_linha(leg)
+    # garante from/to com lat/lon quando OTP retornar
+    for k in ("from", "to"):
+        v = enriched.get(k)
+        if isinstance(v, dict):
+            # normaliza lat/lon como float quando presente
+            for coord in ("lat", "lon"):
+                if coord in v and v[coord] is not None:
+                    try:
+                        v[coord] = float(v[coord])
+                    except Exception:
+                        pass
+    # fare por leg não existe no OTP 2.7 — fica no itinerário; preserva se vier do mock
+    return enriched
+
+
 def _extrair_itinerario_otp(payload):
     """Converte a resposta GraphQL do OTP para o contrato do SmartPass (primeiro itinerário)."""
     todos = _extrair_todos_itinerarios_otp(payload)
     if not todos:
         raise RuntimeError("OTP não encontrou itinerários de transporte para este trajeto.")
     primeiro = todos[0]
-    # compat: retorna contrato legado
+    # compat: retorna contrato legado — linhas mantidas para retrocompatibilidade
     linhas = [
         {
             "linha": _nome_linha(leg),
             "valor_unitario": round(VT_TARIFA_PADRAO, 2),
             "quantidade_dia": 2,
+            "codigo_linha": _codigo_linha(leg),
+            "operadora": _agencia_leg(leg).get("name") or "—",
         }
         for leg in primeiro["legs"]
         if leg.get("route")
@@ -81,6 +134,7 @@ def _extrair_itinerario_otp(payload):
         "caminhada_km": primeiro["caminhada_km"],
         "baldeacoes": primeiro["baldeacoes"],
         "duracao_min": primeiro["duracao_min"],
+        "fare_cents": primeiro.get("fare_cents"),
     }
 
 
@@ -96,16 +150,31 @@ def _extrair_todos_itinerarios_otp(payload):
 
     itinerarios = []
     for edge in edges:
-        legs = edge.get("node", {}).get("legs", [])
+        node = edge.get("node", {})
+        legs_raw = node.get("legs", [])
+        # enriquece legs
+        legs = [_enriquecer_leg(leg) for leg in legs_raw]
         legs_transito = [leg for leg in legs if leg.get("route")]
         if not legs_transito:
             continue
+
+        # fare do itinerário quando grafo foi buildado com fare_attributes.txt
+        fare_cents = None
+        fare = node.get("fare") or {}
+        regular = fare.get("regular") if isinstance(fare, dict) else None
+        if isinstance(regular, dict) and "cents" in regular:
+            try:
+                fare_cents = int(regular["cents"])
+            except Exception:
+                fare_cents = None
 
         linhas = [
             {
                 "linha": _nome_linha(leg),
                 "valor_unitario": round(VT_TARIFA_PADRAO, 2),
                 "quantidade_dia": 2,
+                "codigo_linha": _codigo_linha(leg),
+                "operadora": _agencia_leg(leg).get("name") or "—",
             }
             for leg in legs_transito
         ]
@@ -148,6 +217,7 @@ def _extrair_todos_itinerarios_otp(payload):
                 "duracao_min": duracao_min,
                 "duracao_total_min": duracao_min,
                 "resumo_trajeto": resumo,
+                "fare_cents": fare_cents,
             }
         )
 
@@ -162,7 +232,7 @@ def resolver_itinerario_com_otp(origem_lat, origem_lon, destino_lat, destino_lon
     response = requests.post(
         OTP_GRAPHQL_URL,
         json={"query": _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon)},
-        timeout=20,
+        timeout=10,
     )
     response.raise_for_status()
     return _extrair_itinerario_otp(response.json())
@@ -174,7 +244,7 @@ def resolver_todos_itinerarios_com_otp(origem_lat, origem_lon, destino_lat, dest
     response = requests.post(
         OTP_GRAPHQL_URL,
         json={"query": _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon)},
-        timeout=20,
+        timeout=10,
     )
     response.raise_for_status()
     return _extrair_todos_itinerarios_otp(response.json())
@@ -196,7 +266,7 @@ def consultar_linhas_transporte_oficial(origem_lat, origem_lon, destino_lat, des
     try:
         resultado = resolver_itinerario_com_otp(origem_lat, origem_lon, destino_lat, destino_lon)
         return {"sucesso": True, "fonte": "OpenTripPlanner (GTFS local)", **resultado}
-    except (requests.RequestException, ValueError, TypeError, RuntimeError) as exc:
+    except (requests.RequestException, requests.Timeout, requests.ConnectionError, ValueError, TypeError, RuntimeError) as exc:
         return {"sucesso": False, "fonte": "Estimativa de contingência", "erro": str(exc), "detalhes": []}
 
 
@@ -205,5 +275,5 @@ def consultar_todos_itinerarios_oficial(origem_lat, origem_lon, destino_lat, des
     try:
         itinerarios = resolver_todos_itinerarios_com_otp(origem_lat, origem_lon, destino_lat, destino_lon)
         return {"sucesso": True, "fonte": "OpenTripPlanner (GTFS local)", "itinerarios": itinerarios}
-    except (requests.RequestException, ValueError, TypeError, RuntimeError) as exc:
+    except (requests.RequestException, requests.Timeout, requests.ConnectionError, ValueError, TypeError, RuntimeError) as exc:
         return {"sucesso": False, "fonte": "Estimativa de contingência", "erro": str(exc), "itinerarios": []}
