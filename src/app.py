@@ -15,7 +15,7 @@ import pandas as pd
 from src.services.benefit_calculator import analisar_viabilidade_clt, parse_salario_brasileiro
 from src.services.calendar_engine import calcular_dias_uteis
 from src.services.export_formatter import gerar_export_compra, gerar_export_rubrica
-from src.services.geocoding import buscar_coordenadas_por_cep_ou_endereco
+from src.services.geocoding import buscar_coordenadas_por_cep_ou_endereco, sugerir_enderecos
 from src.services.map_generator import gerar_imagem_mapa_rota
 from src.services.pdf_generator import gerar_pdf_evidencia
 from src.services.routing import (
@@ -24,6 +24,15 @@ from src.services.routing import (
     roteirizar_com_comparativo,
     roteirizar_vale_transporte_automatico,
 )
+
+try:
+    from streamlit_searchbox import st_searchbox
+
+    _SEARCHBOX_DISPONIVEL = True
+except Exception:  # pragma: no cover - fallback defensivo de ambiente
+    st_searchbox = None
+    _SEARCHBOX_DISPONIVEL = False
+
 
 
 # -----------------------------------------------------------------------------
@@ -71,6 +80,12 @@ def _init_session():
         "coords": None,
         "origem_label": "",
         "destino_label": "",
+        "origem_selecionada": None,
+        "destino_selecionada": None,
+        "origem_texto": "",
+        "destino_texto": "",
+        "origem_numero": "",
+        "destino_numero": "",
         "modalidade": "Vale-Transporte",
         "dias_uteis": 22,
         "tarifa": 5.00,
@@ -93,6 +108,113 @@ def _init_session():
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+
+def _buscar_sugestoes_endereco(termo: str) -> list[tuple[str, dict]]:
+    """Search function do ``st_searchbox``: retorna ``(label_exibicao, candidato)``.
+
+    Args:
+        termo: Texto digitado pelo usuário (mínimo 3 caracteres).
+
+    Returns:
+        list[tuple[str, dict]]: Sugestões geocodificadas na RMSP; ``[]`` em falha.
+    """
+    try:
+        sugestoes = sugerir_enderecos(termo, limite=5)
+    except Exception:
+        return []
+    return [(item["label_exibicao"], item) for item in sugestoes]
+
+
+def _render_endereco_autocomplete(chave: str, label: str, default: str) -> str:
+    """Renderiza autocomplete de endereço com fallback nativo e preview de precisão.
+
+    Args:
+        chave: Identificador do campo (``"origem"``/``"destino"``).
+        label: Rótulo exibido no componente.
+        default: Texto inicial quando não há seleção em ``st.session_state``.
+
+    Returns:
+        str: Texto efetivo (label + número condicional) usado na geocodificação.
+    """
+    estado = st.session_state.get(f"{chave}_selecionada") or {}
+    texto_atual = estado.get("label_exibicao") or st.session_state.get(f"{chave}_texto") or default
+
+    if _SEARCHBOX_DISPONIVEL:
+        escolha = st_searchbox(
+            _buscar_sugestoes_endereco,
+            label=label,
+            placeholder="Ex: 06310-000 ou Av. Paulista, 1000",
+            default=estado or texto_atual,
+            default_options=[(estado["label_exibicao"], estado)] if estado.get("label_exibicao") else None,
+            default_use_searchterm=True,
+            clear_on_submit=False,
+            key=f"searchbox_{chave}",
+            rerun_scope="app",
+        )
+        if isinstance(escolha, dict) and escolha.get("label_exibicao"):
+            if escolha.get("label_exibicao") != estado.get("label_exibicao"):
+                st.session_state[f"{chave}_numero"] = ""
+            estado = escolha
+            st.session_state[f"{chave}_selecionada"] = escolha
+            texto_atual = escolha["label_exibicao"]
+            st.session_state[f"{chave}_texto"] = texto_atual
+        elif isinstance(escolha, str) and escolha.strip():
+            texto_atual = escolha.strip()
+            st.session_state[f"{chave}_texto"] = texto_atual
+            if texto_atual != (estado.get("label_exibicao") or ""):
+                st.session_state[f"{chave}_selecionada"] = {}
+                estado = {}
+    else:
+        texto_atual = st.text_input(
+            label,
+            value=texto_atual,
+            placeholder="Ex: 06310-000 ou Av. Paulista, 1000",
+            key=f"txt_{chave}",
+            help="Autocomplete indisponível — digite o CEP/endereço e escolha uma sugestão.",
+        )
+        st.session_state[f"{chave}_texto"] = texto_atual
+        if len(str(texto_atual).strip()) >= 3:
+            opcoes = _buscar_sugestoes_endereco(texto_atual)
+            if opcoes:
+                rotulos = ["— selecionar sugestão —"] + [rotulo for rotulo, _ in opcoes]
+                escolha = st.selectbox("Sugestões encontradas", rotulos, key=f"sel_{chave}")
+                if escolha != rotulos[0]:
+                    estado = opcoes[rotulos.index(escolha) - 1][1]
+                    st.session_state[f"{chave}_selecionada"] = estado
+                    texto_atual = estado["label_exibicao"]
+
+    numero_atual = st.session_state.get(f"{chave}_numero", "")
+    if estado and not estado.get("numero") and estado.get("nivel_precisao") in ("ALTA", "MEDIA"):
+        numero_atual = st.text_input(
+            "Número (opcional — refina a precisão)",
+            value=numero_atual,
+            key=f"numero_{chave}",
+            placeholder="Ex: 1500",
+        )
+        st.session_state[f"{chave}_numero"] = numero_atual
+    elif estado and estado.get("numero"):
+        numero_atual = str(estado["numero"])
+
+    texto_final = str(texto_atual or "")
+    if numero_atual and str(numero_atual).strip() and str(numero_atual).strip() not in texto_final:
+        texto_final = f"{texto_final}, {str(numero_atual).strip()}"
+
+    preview = estado
+    if numero_atual and estado and str(numero_atual) != str(estado.get("numero") or ""):
+        refinado = sugerir_enderecos(texto_final, limite=1)
+        preview = refinado[0] if refinado else estado
+
+    if preview:
+        st.caption(
+            f"{preview.get('semaforo', '')} **{preview.get('nivel_precisao', '')}** · "
+            f"fonte `{preview.get('fonte', '—')}` · {preview.get('label_exibicao', '')}"
+        )
+        st.caption(f"_{preview.get('motivo_precisao', '')}_")
+    else:
+        st.caption("🔎 Digite ao menos 3 caracteres e selecione uma sugestão para ver a precisão.")
+
+    return texto_final
 
 
 def _estimar_tempo_minutos(distancia_km: float, modalidade: str, baldeacoes: int = 0) -> int:
@@ -304,20 +426,13 @@ def main():
         st.markdown("### 🎛️ Painel de Simulação")
         st.caption("Preencha os dados e clique em **Calcular**. Nenhum dado é gravado — tudo permanece em memória.")
 
-        with st.form("form_simulacao", clear_on_submit=False):
-            st.markdown("**Origem e Destino**")
-            origem_input = st.text_input(
-                "Origem (CEP ou endereço)",
-                value=st.session_state.get("origem_label") or "06310-000",
-                placeholder="Ex: 06310-000 ou Av. Paulista, 1000",
-                help="CEP com 8 dígitos ou endereço completo. Geocodificação via ViaCEP + Nominatim.",
-            )
-            destino_input = st.text_input(
-                "Destino (CEP ou endereço)",
-                value=st.session_state.get("destino_label") or "Avenida Paulista, 1000, São Paulo",
-                placeholder="Ex: 04538-132 ou Rua Funchal, 418",
-            )
+        st.markdown("**Origem e Destino**")
+        origem_input = _render_endereco_autocomplete("origem", "Origem (CEP ou endereço)", "06310-000")
+        destino_input = _render_endereco_autocomplete(
+            "destino", "Destino (CEP ou endereço)", "Avenida Paulista, 1000, São Paulo"
+        )
 
+        with st.form("form_simulacao", clear_on_submit=False):
             st.markdown("**Modalidade**")
             modalidade_input = st.selectbox(
                 "Modalidade",
@@ -414,8 +529,10 @@ def main():
 
         # Ações de limpeza
         if st.button("🧹 Limpar Simulação", width='stretch'):
-            for k in ["resultado", "resultado_vt", "resultado_vc", "coords", "pdf_buffer", "batch_df", "batch_resultados", "comparativo", "memoria_calendario"]:
+            for k in ["resultado", "resultado_vt", "resultado_vc", "coords", "pdf_buffer", "batch_df", "batch_resultados", "comparativo", "memoria_calendario", "origem_selecionada", "destino_selecionada"]:
                 st.session_state[k] = None
+            for k in ["origem_texto", "destino_texto", "origem_numero", "destino_numero"]:
+                st.session_state[k] = ""
             st.session_state["rota_selecionada"] = "economica"
             st.session_state["ultimo_calculo_em"] = None
             st.session_state["salario_base"] = 0.0
@@ -722,7 +839,7 @@ def main():
     dias_uteis_atual = st.session_state.dias_uteis
 
     if resultado is None:
-        st.info("👈 Preencha o **Painel de Simulação** na lateral e clique em **Calcular Rota e Benefício** para ver o dashboard. Nenhuma chamada é feita até o clique (uso de `st.form`).")
+        st.info("👈 Preencha o **Painel de Simulação** na lateral e clique em **Calcular Rota e Benefício** para ver o dashboard. O autocomplete geocodifica sob demanda com cache de 1h; o cálculo só ocorre no clique.")
         # Exemplo ilustrativo estático
         st.markdown("#### Exemplo de fluxo")
         st.markdown(
