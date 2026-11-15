@@ -14,7 +14,8 @@ import os
 import re
 
 import requests
-import streamlit as st
+
+from src.services.cache import st_cache_data
 
 # Mapa de precisão -> semáforo / motivo padrão
 _MAPA_SEMAFORO = {
@@ -203,7 +204,7 @@ def _candidato(
     }
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st_cache_data(ttl=3600, show_spinner=False)
 def _consultar_viacep(cep: str) -> dict:
     """Consulta o ViaCEP e retorna os campos estruturados do CEP.
 
@@ -239,7 +240,7 @@ def _consultar_viacep(cep: str) -> dict:
         return {"sucesso": False, "erro": str(exc)}
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st_cache_data(ttl=3600, show_spinner=False)
 def _consultar_brasilapi(cep: str) -> dict:
     """Consulta a BrasilAPI (fallback do ViaCEP) com coordenadas quando disponíveis.
 
@@ -280,7 +281,7 @@ def _consultar_brasilapi(cep: str) -> dict:
         return {"sucesso": False, "erro": str(exc)}
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st_cache_data(ttl=3600, show_spinner=False)
 def _consultar_photon(termo: str, limite: int = 5) -> list[dict]:
     """Consulta o Photon com bbox/foco RMSP e prioriza logradouro + número.
 
@@ -345,7 +346,7 @@ def _consultar_photon(termo: str, limite: int = 5) -> list[dict]:
         return []
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st_cache_data(ttl=3600, show_spinner=False)
 def _consultar_nominatim_estruturado(
     texto: str = "",
     *,
@@ -449,7 +450,7 @@ def _consultar_nominatim_estruturado(
         return []
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st_cache_data(ttl=3600, show_spinner=False)
 def _consultar_google(termo: str, limite: int = 5) -> list[dict]:
     """Consulta o Google Geocoding apenas quando ``GOOGLE_MAPS_API_KEY`` está definida.
 
@@ -532,7 +533,7 @@ def _deduplicar(candidatos: list[dict], limite: int) -> list[dict]:
     return unicos[: max(1, int(limite))]
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st_cache_data(ttl=3600, show_spinner=False)
 def sugerir_enderecos(termo: str, limite: int = 5) -> list[dict]:
     """Sugere endereços na RMSP com pipeline CEP → Photon/Nominatim → Google.
 
@@ -734,7 +735,7 @@ def sugerir_enderecos(termo: str, limite: int = 5) -> list[dict]:
     return _deduplicar(candidatos, limite)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st_cache_data(ttl=3600, show_spinner=False)
 def buscar_coordenadas_por_cep_ou_endereco(busca_texto: str) -> dict:
     """Fachada legada (lote/UI) sobre ``sugerir_enderecos`` com o melhor resultado.
 

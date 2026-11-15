@@ -11,3 +11,9 @@ matplotlib==3.11.2
 Pillow==13.0.0
 psycopg2-binary==2.9.13
 PyYAML==6.0.2
+cachetools==5.5.0
+fastapi==0.115.14
+uvicorn[standard]==0.34.0
+python-multipart==0.0.12
+pydantic==2.10.4
+httpx==0.28.1

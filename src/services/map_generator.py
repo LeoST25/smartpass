@@ -23,7 +23,8 @@ import logging
 import math
 
 import requests
-import streamlit as st
+
+from src.services.cache import st_cache_data
 import matplotlib
 
 matplotlib.use("Agg")  # Backend sem interface gráfica para servidores
@@ -149,7 +150,7 @@ def _simplificar_polyline(pontos: list, epsilon: float = EPSILON_SIMPLIFICACAO) 
     return simplificada
 
 
-@st.cache_data(ttl=600, show_spinner=False, max_entries=256)
+@st_cache_data(ttl=600, show_spinner=False, max_entries=256)
 def _buscar_geometria_osrm(origem_lat, origem_lon, destino_lat, destino_lon):
     """Busca geometria da rota no OSRM com fallback para linha reta.
 

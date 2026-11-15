@@ -1,6 +1,6 @@
 import requests
-import streamlit as st
 
+from src.services.cache import st_cache_data
 from src.services.transit_api import (
     consultar_linhas_transporte_oficial,
     consultar_todos_itinerarios_oficial,
@@ -8,7 +8,7 @@ from src.services.transit_api import (
 )
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st_cache_data(ttl=600, show_spinner=False)
 def _distancia_rodoviaria_km(origem_lat, origem_lon, destino_lat, destino_lon, padrao=10.0):
     url = (
         "http://router.project-osrm.org/route/v1/driving/"
