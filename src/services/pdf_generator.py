@@ -288,13 +288,9 @@ def gerar_pdf_evidencia(dados_candidato, tipo_beneficio, dados_calculo, coords=N
         # o traçado destacado sobre os tiles urbanos; caso contrário, cai no
         # traçado rodoviário/linha reta com fallback offline.
         rota_para_mapa = _rota_para_mapa_pdf(dados_calculo)
-        try:
-            img_buffer = gerar_imagem_mapa_rota(
-                lat_o, lon_o, lat_d, lon_d, rota_dados=rota_para_mapa
-            )
-        except TypeError:
-            # Compatibilidade com implementações antigas da assinatura.
-            img_buffer = gerar_imagem_mapa_rota(lat_o, lon_o, lat_d, lon_d)
+        img_buffer = gerar_imagem_mapa_rota(
+            lat_o, lon_o, lat_d, lon_d, rota_dados=rota_para_mapa
+        )
         story.append(Image(img_buffer, width=540, height=270))
     else:
         story.append(Paragraph("<i>Evidência cartográfica indisponível para esta consulta.</i>", styles['Normal']))

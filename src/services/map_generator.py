@@ -45,10 +45,10 @@ CORES_MODAL = {
 COR_PADRAO = "#1E3A8A"
 
 # --- Tiles urbanos ---------------------------------------------------------
-# Host único (sem rotação de subdomínio) para funcionar no staticmap.
-# NOTA: CartoDB Positron passou a exigir API key (retorna tile "API KEY
-# REQUIRED"), por isso usamos OpenStreetMap como base e Esri Light/S Street
-# Map como camadas alternativas — todos sem chave e com nomes de ruas.
+# NOTA: CartoDB Positron passou a exigir API key (retorna o tile
+# "API KEY REQUIRED"), por isso usamos OpenStreetMap como base e Esri
+# Light/Street Map como camadas alternativas — todos sem chave e exibindo
+# nomes de ruas, bairros e estabelecimentos.
 TILE_OSM = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 TILE_ESRI_LIGHT = (
     "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
@@ -58,12 +58,7 @@ TILE_ESRI_STREET = (
     "https://server.arcgisonline.com/ArcGIS/rest/services/"
     "World_Street_Map/MapServer/tile/{z}/{y}/{x}"
 )
-TILE_CARTO_POSITRON = (
-    "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/"
-    "World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
-)
 TILE_OSM_SUBDOMINIO = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-ATRIBUICAO_CARTO = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
 ATRIBUICAO_OSM = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
 ATRIBUICAO_ESRI = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; Esri'
 
