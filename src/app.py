@@ -442,9 +442,6 @@ def main():
                                     "desconto_colaborador": viab_lote.get("desconto_colaborador", 0.0),
                                     "subsidio_empresa": viab_lote.get("custeio_empresa", 0.0),
                                     "status_viabilidade_clt": status_clt,
-                                    "nivel_precisao": nivel_lote,
-                                    "semaforo": semaforo_lote,
-                                    "motivo_precisao": motivo_lote,
                                 })
                             except Exception as exc:
                                 resultados_lote.append({"linha": idx + 1, "origem": str(origem_lote), "destino": str(destino_lote), "erro": str(exc), "nivel_precisao": "BAIXA", "semaforo": "🔴 Revisar Endereço", "motivo_precisao": str(exc)[:180]})
@@ -501,7 +498,7 @@ def main():
                     mime="text/csv",
                     width='stretch',
                 )
-                st.caption("Colunas obrigatórias: **origem**, **destino**. Opcional: **nome**, **salario_base** (ex: 2500.00 ou R$ 2.500,00). Saída inclui **teto_6_pct, desconto_colaborador, subsidio_empresa, status_viabilidade_clt, nivel_precisao, semaforo, motivo_precisao**.")
+                st.caption("Colunas obrigatórias: **origem**, **destino**. Opcional: **nome**, **salario_base** (ex: 2500.00 ou R$ 2.500,00). Saída inclui **teto_6_pct, desconto_colaborador, subsidio_empresa, status_viabilidade_clt**.")
 
         st.divider()
         st.caption("🔒 **LGPD / Stateless:** nenhum dado persiste em banco. PDFs e mapas são gerados em `BytesIO` e mantidos apenas em `st.session_state`.")
