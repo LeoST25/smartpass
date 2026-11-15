@@ -1,10 +1,17 @@
 """Roteamento de transporte público via OpenTripPlanner (OTP).
 
 Extração rica por leg: mode, distance, duration, from{ name lat lon }, to{ name lat lon },
-route{ gtfsId shortName longName agency{ gtfsId name } } e fare do itinerário quando disponível.
+route{ gtfsId shortName longName agency{ gtfsId name } }.
+A tarifa NÃO é consultada no OTP: o campo ``fare`` do schema GraphQL 2.x é opcional
+e, quando ausente no grafo, aborta a query com ``Field 'fare' in type 'Itinerary'
+is undefined``. O cálculo tarifário é responsabilidade exclusiva do ``fare_engine``.
+
 Timeout 10s conforme gis-routing-otp/SKILL.md e fallback LGPD stateless.
+Erros técnicos são registrados apenas no logging do servidor; o usuário recebe
+uma mensagem genérica e acionável.
 """
 
+import logging
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -15,13 +22,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 OTP_GRAPHQL_URL = os.getenv("OTP_GRAPHQL_URL", "http://localhost:8080/otp/gtfs/v1")
 VT_TARIFA_PADRAO = float(os.getenv("VT_TARIFA_PADRAO", "5.00"))
 TIMEZONE_RMSP = ZoneInfo("America/Sao_Paulo")
 
 
 def _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon):
-    """Monta a consulta GraphQL compatível com OTP 2.7+ — extração rica."""
+    """Monta a consulta GraphQL compatível com OTP 2.x — apenas pernas e rotas.
+
+    O campo ``fare`` é intencionalmente omitido: o schema do OTP 2.x não garante
+    esse campo no tipo ``Itinerary`` quando o grafo não é buildado com
+    ``fare_attributes.txt``, e a query inteira falha. A tarifa é resolvida
+    exclusivamente em ``fare_engine.py`` (GTFS > catálogo RMSP > base).
+    """
     data_hora = datetime.now(TIMEZONE_RMSP).isoformat(timespec="minutes")
     return f"""
     {{
@@ -45,7 +60,6 @@ def _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon):
               to {{ name lat lon }}
               route {{ gtfsId shortName longName agency {{ gtfsId name }} }}
             }}
-            fare {{ regular {{ cents }} }}
           }}
         }}
       }}
@@ -103,7 +117,7 @@ def _enriquecer_leg(leg: dict) -> dict:
                         v[coord] = float(v[coord])
                     except Exception:
                         pass
-    # fare por leg não existe no OTP 2.7 — fica no itinerário; preserva se vier do mock
+    # fare por leg não existe no OTP 2.x sem grafo tarifário — cálculo fica no fare_engine
     return enriched
 
 
@@ -134,7 +148,6 @@ def _extrair_itinerario_otp(payload):
         "caminhada_km": primeiro["caminhada_km"],
         "baldeacoes": primeiro["baldeacoes"],
         "duracao_min": primeiro["duracao_min"],
-        "fare_cents": primeiro.get("fare_cents"),
     }
 
 
@@ -142,10 +155,16 @@ def _extrair_todos_itinerarios_otp(payload):
     """Converte payload OTP para lista de itinerários enriquecidos (até 3)."""
     erros = payload.get("errors") or []
     if erros:
-        raise RuntimeError(erros[0].get("message", "OTP rejeitou a consulta."))
+        detalhes = "; ".join(
+            str(erro.get("message", erro)) if isinstance(erro, dict) else str(erro)
+            for erro in erros
+        )
+        logger.error("OTP GraphQL retornou erros: %s", detalhes)
+        raise RuntimeError("O serviço de rotas rejeitou a consulta.")
 
     edges = payload.get("data", {}).get("planConnection", {}).get("edges", [])
     if not edges:
+        logger.warning("OTP GraphQL não retornou itinerários para o trajeto informado.")
         raise RuntimeError("OTP não encontrou itinerários de transporte para este trajeto.")
 
     itinerarios = []
@@ -157,16 +176,6 @@ def _extrair_todos_itinerarios_otp(payload):
         legs_transito = [leg for leg in legs if leg.get("route")]
         if not legs_transito:
             continue
-
-        # fare do itinerário quando grafo foi buildado com fare_attributes.txt
-        fare_cents = None
-        fare = node.get("fare") or {}
-        regular = fare.get("regular") if isinstance(fare, dict) else None
-        if isinstance(regular, dict) and "cents" in regular:
-            try:
-                fare_cents = int(regular["cents"])
-            except Exception:
-                fare_cents = None
 
         linhas = [
             {
@@ -217,7 +226,6 @@ def _extrair_todos_itinerarios_otp(payload):
                 "duracao_min": duracao_min,
                 "duracao_total_min": duracao_min,
                 "resumo_trajeto": resumo,
-                "fare_cents": fare_cents,
             }
         )
 
@@ -257,17 +265,35 @@ def estimar_itinerario_fallback(distancia_km: float):
             {"linha": "Estimativa: transporte público urbano (validar com colaborador)", "valor_unitario": 5.00, "quantidade_dia": 2}
         ],
         "distancia_km": round(max(distancia_km, 0.1), 2),
-        "resumo_trajeto": "OpenTripPlanner indisponível ou sem GTFS aplicável. Estimativa provisória para validação manual pelo time de Admissão.",
+        "resumo_trajeto": "Estimativa provisória de transporte público para validação manual pelo time de Admissão.",
     }
 
 
 def consultar_linhas_transporte_oficial(origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem="", endereco_destino=""):
-    """Compatibilidade com o serviço anterior, agora usando OTP como fonte primária."""
+    """Compatibilidade com o serviço anterior, agora usando OTP como fonte primária.
+
+    Em falha, o detalhe técnico vai apenas para o logging do servidor; o contrato
+    devolve uma mensagem genérica e acionável para a interface.
+    """
     try:
         resultado = resolver_itinerario_com_otp(origem_lat, origem_lon, destino_lat, destino_lon)
         return {"sucesso": True, "fonte": "OpenTripPlanner (GTFS local)", **resultado}
     except (requests.RequestException, requests.Timeout, requests.ConnectionError, ValueError, TypeError, RuntimeError) as exc:
-        return {"sucesso": False, "fonte": "Estimativa de contingência", "erro": str(exc), "detalhes": []}
+        logger.warning(
+            "Falha na consulta OTP (%.5f,%.5f -> %.5f,%.5f): %s",
+            origem_lat,
+            origem_lon,
+            destino_lat,
+            destino_lon,
+            exc,
+            exc_info=True,
+        )
+        return {
+            "sucesso": False,
+            "fonte": "Estimativa de contingência",
+            "erro": "Não foi possível obter a rota oficial agora. Exibindo estimativa provisória para validação manual.",
+            "detalhes": [],
+        }
 
 
 def consultar_todos_itinerarios_oficial(origem_lat, origem_lon, destino_lat, destino_lon):
@@ -276,4 +302,18 @@ def consultar_todos_itinerarios_oficial(origem_lat, origem_lon, destino_lat, des
         itinerarios = resolver_todos_itinerarios_com_otp(origem_lat, origem_lon, destino_lat, destino_lon)
         return {"sucesso": True, "fonte": "OpenTripPlanner (GTFS local)", "itinerarios": itinerarios}
     except (requests.RequestException, requests.Timeout, requests.ConnectionError, ValueError, TypeError, RuntimeError) as exc:
-        return {"sucesso": False, "fonte": "Estimativa de contingência", "erro": str(exc), "itinerarios": []}
+        logger.warning(
+            "Falha ao consultar itinerários OTP (%.5f,%.5f -> %.5f,%.5f): %s",
+            origem_lat,
+            origem_lon,
+            destino_lat,
+            destino_lon,
+            exc,
+            exc_info=True,
+        )
+        return {
+            "sucesso": False,
+            "fonte": "Estimativa de contingência",
+            "erro": "Não foi possível obter as rotas oficiais agora.",
+            "itinerarios": [],
+        }

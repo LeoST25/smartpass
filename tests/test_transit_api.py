@@ -4,6 +4,7 @@ import pytest
 import requests
 
 from src.services.transit_api import (
+    _consulta_otp,
     _extrair_itinerario_otp,
     consultar_linhas_transporte_oficial,
     estimar_itinerario_fallback,
@@ -34,8 +35,8 @@ def test_extrair_itinerario_otp_sucesso(otp_payload_completo):
 
 
 def test_extrair_itinerario_otp_erro_graphql():
-    payload = {"errors": [{"message": "OTP rejeitou a consulta."}]}
-    with pytest.raises(RuntimeError, match="OTP rejeitou"):
+    payload = {"errors": [{"message": "Validation error: Field 'fare' is undefined"}]}
+    with pytest.raises(RuntimeError, match="rejeitou a consulta"):
         _extrair_itinerario_otp(payload)
 
 
@@ -67,6 +68,26 @@ def test_consultar_linhas_transporte_oficial_sucesso(otp_payload_completo):
         assert res["sucesso"] is True
         assert res["fonte"] == "OpenTripPlanner (GTFS local)"
         assert res["distancia_km"] > 0
+
+
+def test_consulta_otp_nao_solicita_fare():
+    query = _consulta_otp(-23.5, -46.8, -23.55, -46.63)
+    assert "fare" not in query.lower()
+    assert "planConnection" in query
+    assert "legs" in query
+    assert "gtfsId" in query
+
+
+def test_consultar_linhas_erro_tecnico_nao_vaza_para_usuario():
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"errors": [{"message": "Validation error: Field 'fare' in type 'Itinerary' is undefined"}]}
+    mock_resp.raise_for_status = MagicMock()
+    with patch("src.services.transit_api.requests.post", return_value=mock_resp):
+        res = consultar_linhas_transporte_oficial(-23.5, -46.8, -23.55, -46.63)
+    assert res["sucesso"] is False
+    assert "Validation" not in res["erro"]
+    assert "fare" not in res["erro"].lower()
+    assert "estimativa provisória" in res["erro"].lower()
 
 
 def test_consultar_linhas_transporte_oficial_fallback():
