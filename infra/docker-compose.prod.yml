@@ -76,6 +76,8 @@ services:
       context: ../frontend
       dockerfile: Dockerfile
     image: smartpass:web-prod
+    ports:
+      - "3000:80"
     restart: always
     logging:
       driver: json-file

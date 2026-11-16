@@ -26,7 +26,7 @@ function AppContent() {
       <button
         type="button"
         onClick={() => setBatchModalOpen(true)}
-        className="fixed top-20 right-4 z-20 bg-white hover:bg-slate-50 border border-slate-200 rounded-lg shadow-lg px-3 py-2 flex items-center gap-2 transition-colors"
+        className="fixed top-20 right-4 z-[1050] bg-white hover:bg-slate-50 border border-slate-200 rounded-lg shadow-lg px-3 py-2 flex items-center gap-2 transition-colors"
         aria-label="Abrir simulação em lote"
       >
         <FileUp className="w-4 h-4 text-smartpass-600" />
@@ -44,11 +44,9 @@ function AppContent() {
           <Legend />
         </div>
 
-        {/* Painel lateral (sempre visível no desktop, condicional no mobile) */}
+        {/* Painel lateral — fixo (z-[1000]), não bloqueia o mapa no desktop */}
         <div
-          className={`absolute inset-0 ${
-            state.viewMode === 'panel' ? 'block' : 'hidden lg:block'
-          }`}
+          className={state.viewMode === 'panel' ? 'block' : 'hidden lg:block'}
         >
           <SidePanel>
             <SearchForm />

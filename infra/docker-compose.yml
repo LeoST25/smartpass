@@ -89,8 +89,6 @@ services:
       context: ../frontend
       dockerfile: Dockerfile
     image: smartpass:web
-    ports:
-      - "3000:80"
     depends_on:
       - api
     networks:
