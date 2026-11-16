@@ -12,7 +12,7 @@ services:
 
   otp:
     ports:
-      - "8080:8080"
+      - "3001:8080"
     restart: "no"
     networks:
       - smartpass
@@ -31,7 +31,7 @@ services:
       DB_USER: ${DB_USER:-smartpass_user}
       DB_PASS: ${DB_PASS:-changeme}
       OTP_GRAPHQL_URL: http://otp:8080/otp/gtfs/v1
-      CORS_ORIGINS: http://localhost:3000,http://localhost:5173,http://localhost:8080
+      CORS_ORIGINS: http://localhost:8080,http://localhost:5173,http://localhost:3001
       DEBUG: "1"
     volumes:
       - ../src:/app/src
