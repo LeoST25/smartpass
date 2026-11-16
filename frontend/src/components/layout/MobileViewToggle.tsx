@@ -9,7 +9,7 @@ export function MobileViewToggle() {
   const { state, dispatch } = useAppState();
 
   return (
-    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-20 lg:hidden bg-white rounded-full shadow-lg border border-slate-200 p-1 flex gap-1">
+    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[1000] lg:hidden bg-white rounded-full shadow-lg border border-slate-200 p-1 flex gap-1">
       <button
         type="button"
         onClick={() => dispatch({ type: 'SET_VIEW_MODE', payload: 'map' })}

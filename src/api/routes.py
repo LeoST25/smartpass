@@ -77,7 +77,7 @@ def health():
     try:
         resp_otp = requests.post(
             otp_url,
-            json={"query": "{ _service { name } }"},
+            json={"query": "{ feeds { feedId } }"},
             timeout=OTP_HEALTH_TIMEOUT,
         )
         otp_latency = round((time.monotonic() - t0_otp) * 1000, 2)
