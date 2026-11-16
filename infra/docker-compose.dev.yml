@@ -12,7 +12,7 @@ services:
 
   otp:
     ports:
-      - "3001:8080"
+      - "8080:8080"
     restart: "no"
     networks:
       - smartpass
@@ -31,13 +31,28 @@ services:
       DB_USER: ${DB_USER:-smartpass_user}
       DB_PASS: ${DB_PASS:-changeme}
       OTP_GRAPHQL_URL: http://otp:8080/otp/gtfs/v1
-      CORS_ORIGINS: http://localhost:8080,http://localhost:5173,http://localhost:3001
+      CORS_ORIGINS: http://localhost:3000,http://localhost:5173
       DEBUG: "1"
     volumes:
       - ../src:/app/src
     command: ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     ports:
       - "8000:8000"
+    restart: "no"
+    networks:
+      - smartpass
+
+  # Frontend React (Vite dev server com HMR)
+  web:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.dev
+    image: smartpass:web-dev
+    ports:
+      - "3000:5173"
+    volumes:
+      - ../frontend/src:/app/src
+      - ../frontend/public:/app/public
     restart: "no"
     networks:
       - smartpass
