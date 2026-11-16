@@ -6,9 +6,11 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    host: '0.0.0.0',
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        // Em Docker, usa nome do serviço; em dev local, usa localhost
+        target: process.env.DOCKER_ENV === 'true' ? 'http://api:8000' : 'http://localhost:8000',
         changeOrigin: true,
       },
     },

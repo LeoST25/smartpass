@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1.6
+# Dockerfile de desenvolvimento para o frontend com Vite HMR
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copia package files primeiro para cache de dependências
+COPY package.json package-lock.json* ./
+RUN npm ci --no-audit --no-fund
+
+# Copia código (será sobreposto por volume em dev)
+COPY . .
+
+# Vite dev server escuta na porta 5173
+EXPOSE 5173
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
+    CMD wget -qO- http://localhost:5173 || exit 1
+
+# Inicia Vite dev server com hot reload, acessível de fora do container
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

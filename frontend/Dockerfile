@@ -26,8 +26,8 @@ COPY --from=build /app/dist /usr/share/nginx/html
 
 # Healthcheck do Nginx
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=10s \
-    CMD wget -qO- http://localhost:8080/health || exit 1
+    CMD wget -qO- http://localhost:80/health || exit 1
 
-EXPOSE 8080
+EXPOSE 80
 
 CMD ["nginx", "-g", "daemon off;"]
