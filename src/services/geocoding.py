@@ -42,6 +42,7 @@ _RMSP_FOCO = (-23.5505, -46.6333)
 
 _PHOTON_URL = "https://photon.komoot.io/api/"
 _NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+_NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
 _VIACEP_URL = "https://viacep.com.br/ws/{cep}/json/"
 _BRASILAPI_URL = "https://brasilapi.com.br/api/cep/v2/{cep}"
 _GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
@@ -771,3 +772,87 @@ def buscar_coordenadas_por_cep_ou_endereco(busca_texto: str) -> dict:
         "fonte": melhor["fonte"],
         "cep": melhor.get("cep", ""),
     }
+
+
+@st_cache_data(ttl=3600, show_spinner=False)
+def geocodificar_reverso(lat: float, lon: float) -> dict:
+    """Geocodificação reversa (coordenada → endereço) via Nominatim para a RMSP.
+
+    Usada quando o usuário arrasta o pino no mapa (coordenadas explícitas): atualiza
+    ``endereco_encontrado`` e o semáforo de precisão sem quebrar a trilha de auditoria.
+    LGPD stateless: apenas retorno em memória.
+
+    Args:
+        lat: Latitude WGS84.
+        lon: Longitude WGS84.
+
+    Returns:
+        dict: Em sucesso ``{"sucesso": True, "lat", "lon", "endereco_encontrado",
+        "nivel_precisao", "semaforo", "motivo_precisao", "fonte"}``.
+        Em falha ``{"sucesso": False, "erro": str}`` (o chamador mantém o label anterior).
+    """
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except (TypeError, ValueError):
+        return {"sucesso": False, "erro": "Coordenada inválida."}
+
+    if not _dentro_rmsp(lat_f, lon_f):
+        return {"sucesso": False, "erro": "Coordenada fora da área atendida (RMSP)."}
+
+    params = {
+        "format": "json",
+        "lat": lat_f,
+        "lon": lon_f,
+        "addressdetails": 1,
+        "zoom": 18,
+        "accept-language": "pt-BR",
+    }
+    try:
+        response = requests.get(
+            _NOMINATIM_REVERSE_URL,
+            params=params,
+            headers=_HEADERS_NOMINATIM,
+            timeout=_TIMEOUT_PADRAO,
+        )
+        response.raise_for_status()
+        dados = response.json()
+        if not isinstance(dados, dict) or not dados.get("lat"):
+            return {"sucesso": False, "erro": "Endereço não localizado para a coordenada."}
+
+        endereco = dados.get("address") or {}
+        logradouro = endereco.get("road") or endereco.get("pedestrian") or endereco.get("highway") or ""
+        numero = str(endereco.get("house_number") or "").strip()
+        bairro = endereco.get("suburb") or endereco.get("neighbourhood") or ""
+        cidade = endereco.get("city") or endereco.get("town") or endereco.get("village") or ""
+        uf = endereco.get("state_code") or endereco.get("state") or ""
+        cep = endereco.get("postcode") or ""
+
+        label = _montar_label(logradouro, numero, bairro, cidade, uf, cep)
+        if not label or label == "Endereço sem rótulo":
+            label = dados.get("display_name") or f"Lat {lat_f:.5f}, Lon {lon_f:.5f}"
+
+        nivel = "ALTA" if numero else ("MEDIA" if logradouro else "BAIXA")
+        motivo = (
+            f"Reverse geocoding: logradouro + número {numero} — coordenada validada"
+            if numero
+            else ("Reverse geocoding: logradouro aproximado — validação recomendada" if logradouro
+                  else "Reverse geocoding: coordenada centralizada")
+        )
+
+        return {
+            "sucesso": True,
+            "lat": lat_f,
+            "lon": lon_f,
+            "endereco_encontrado": label,
+            "nivel_precisao": nivel,
+            "semaforo": _MAPA_SEMAFORO.get(nivel, ""),
+            "motivo_precisao": motivo,
+            "fonte": "nominatim_reverse",
+        }
+    except requests.RequestException:
+        return {"sucesso": False, "erro": "Serviço de geocodificação reversa indisponível."}
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return {"sucesso": False, "erro": "Resposta inesperada da geocodificação reversa."}
+    except Exception as exc:
+        return {"sucesso": False, "erro": str(exc)}

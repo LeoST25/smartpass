@@ -1,19 +1,18 @@
 /**
- * Painel de resultados com cards, toggle, banner CLT, timeline e download.
+ * Painel de resultados do roteirizador individual:
+ * cards de opções, timeline Ida/Volta, banner CLT e download do comprovante.
  */
 
 import { AlertCircle } from 'lucide-react';
 import { useAppState } from '../../state/AppContext';
-import { SummaryCards } from './SummaryCards';
-import { RouteToggle } from './RouteToggle';
+import { OptionCards } from './OptionCards';
+import { JourneyTimeline } from './JourneyTimeline';
 import { CltBanner } from './CltBanner';
-import { Timeline } from './Timeline';
 import { DownloadPdfButton } from './DownloadPdfButton';
 
 export function ResultsPanel() {
   const { state } = useAppState();
 
-  // Estado de carregamento
   if (state.loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -25,7 +24,6 @@ export function ResultsPanel() {
     );
   }
 
-  // Estado de erro
   if (state.error) {
     return (
       <div className="bg-red-50 border border-red-200 rounded-lg p-4">
@@ -40,12 +38,8 @@ export function ResultsPanel() {
     );
   }
 
-  // Sem resultado ainda
-  if (!state.result) {
-    return null;
-  }
+  if (!state.result) return null;
 
-  // Sem sucesso
   if (!state.result.sucesso) {
     return (
       <div className="bg-red-50 border border-red-200 rounded-lg p-4">
@@ -69,10 +63,9 @@ export function ResultsPanel() {
         </p>
       </div>
 
-      <SummaryCards />
-      <RouteToggle />
+      <OptionCards />
       <CltBanner />
-      <Timeline />
+      <JourneyTimeline />
       <DownloadPdfButton />
     </div>
   );

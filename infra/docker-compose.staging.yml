@@ -77,31 +77,6 @@ services:
         limits:
           memory: 512M
 
-  # Streamlit UI (legado)
-  app:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: production
-    image: smartpass:app-staging
-    environment:
-      DB_HOST: db
-      DB_PORT: 5432
-      DB_NAME: ${DB_NAME:-smartpass}
-      DB_USER: ${DB_USER:-smartpass_user}
-      DB_PASS: ${DB_PASS:-changeme}
-      OTP_GRAPHQL_URL: http://otp:8080/otp/gtfs/v1
-      STREAMLIT_ENV: staging
-    ports:
-      - "8502:8501"
-    restart: unless-stopped
-    networks:
-      - smartpass_staging
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-
 networks:
   smartpass_staging:
     name: smartpass_staging

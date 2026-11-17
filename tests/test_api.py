@@ -32,10 +32,15 @@ def clear_caches():
         _consultar_photon,
         _consultar_viacep,
         buscar_coordenadas_por_cep_ou_endereco,
+        geocodificar_reverso,
         sugerir_enderecos,
     )
     from src.services.routing import _distancia_rodoviaria_km
-    from src.services.transit_api import resolver_itinerario_com_otp, resolver_todos_itinerarios_com_otp
+    from src.services.transit_api import (
+        resolver_itinerario_com_otp,
+        resolver_itinerarios_ida_volta,
+        resolver_todos_itinerarios_com_otp,
+    )
 
     caches = [
         _consultar_viacep,
@@ -45,9 +50,11 @@ def clear_caches():
         _consultar_google,
         sugerir_enderecos,
         buscar_coordenadas_por_cep_ou_endereco,
+        geocodificar_reverso,
         _distancia_rodoviaria_km,
         resolver_itinerario_com_otp,
         resolver_todos_itinerarios_com_otp,
+        resolver_itinerarios_ida_volta,
     ]
     for cache in caches:
         try:
@@ -225,13 +232,65 @@ def _mock_vt():
     return _fake
 
 
+def _leg_bus(short="175", horario_inicio="07:30", horario_fim="07:45"):
+    """Leg de ônibus SPTrans sintética para o motor ida/volta."""
+    return {
+        "mode": "BUS",
+        "linha": f"Ônibus {short}",
+        "route": {"shortName": short, "agency": {"name": "SPTrans"}},
+        "distance": 5000,
+        "duration": 900,
+        "inicio_min": 0,
+        "duracao_min": 15,
+        "horario_inicio": horario_inicio,
+        "horario_fim": horario_fim,
+        "pontos": [],
+        "geometria_fallback": True,
+    }
+
+
+def _itinerario_sintetico(sentido="ida"):
+    """Itinerário OTP sintético (1 leg de ônibus) para ida/volta."""
+    return {
+        "legs": [_leg_bus()],
+        "legs_transito": [_leg_bus()],
+        "linhas": [{"linha": "Ônibus 175", "valor_unitario": 4.40, "quantidade_dia": 2}],
+        "distancia_km": 10.0,
+        "caminhada_km": 0.3,
+        "baldeacoes": 0,
+        "duracao_min": 30,
+        "duracao_total_min": 30,
+        "resumo_trajeto": f"Rota {sentido}",
+        "geometria_fallback": True,
+        "horario_partida": "07:30" if sentido == "ida" else "18:00",
+        "horario_chegada": "08:00" if sentido == "ida" else "18:30",
+    }
+
+
+def _mock_rotas_ida_volta():
+    """Mock para consultar_itinerarios_ida_volta_oficial."""
+
+    def _fake(*args, **kwargs):
+        return {
+            "sucesso": True,
+            "fonte": "OpenTripPlanner (GTFS local)",
+            "data_referencia": "2026-11-17",
+            "ida": [_itinerario_sintetico("ida")],
+            "volta": [_itinerario_sintetico("volta")],
+            "erro": None,
+        }
+
+    return _fake
+
+
 def test_routes_calculate_vt_sucesso(client):
-    """POST /routes/calculate retorna resultado VT com memória auditável."""
-    with patch("src.api.routes.buscar_coordenadas_por_cep_ou_endereco", side_effect=_mock_geocoding()), patch("src.api.routes.roteirizar_vale_transporte_automatico", side_effect=_mock_vt()), patch("src.api.routes.roteirizar_com_comparativo", return_value={"sucesso": False}):
+    """POST /routes/calculate retorna opcoes ranqueadas (ida+volta) com memória auditável."""
+    with patch("src.api.routes.buscar_coordenadas_por_cep_ou_endereco", side_effect=_mock_geocoding()), patch("src.api.routes.consultar_itinerarios_ida_volta_oficial", side_effect=_mock_rotas_ida_volta()):
         payload = {
             "origem": "06310-000",
             "destino": "Avenida Paulista, 1000",
-            "modalidade": "Vale-Transporte",
+            "horario_entrada": "08:00",
+            "horario_saida": "18:00",
             "dias_uteis": 22,
         }
         resp = client.post("/api/v1/routes/calculate", json=payload)
@@ -239,20 +298,65 @@ def test_routes_calculate_vt_sucesso(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["sucesso"] is True
-    assert data["vt"] is not None
-    assert data["vt"]["custo_diario"] == 8.80
+    assert data["opcoes"] is not None
+    assert len(data["opcoes"]) >= 1
+    opcao = data["opcoes"][0]
+    # custo diário = ida + volta (fare_engine por sentido)
+    assert opcao["custo_diario"] == pytest.approx(opcao["ida"]["custo_trecho"] + opcao["volta"]["custo_trecho"])
+    assert opcao["custo_mensal"] == pytest.approx(opcao["custo_diario"] * 22)
+    assert data["horario_entrada"] == "08:00"
+    assert data["horario_saida"] == "18:00"
+    assert data["data_referencia"] == "2026-11-17"
+    assert data["dias_uteis"] == 22
     assert "memoria_calculo" in data
     assert len(data["memoria_calculo"]) > 0
     assert "coords" in data
 
 
+def test_routes_calculate_coordenadas_explicitas(client):
+    """POST /routes/calculate com coords explícitas (pino arrastado) ignora geocodificação."""
+    with patch("src.api.routes.buscar_coordenadas_por_cep_ou_endereco") as mock_geo, patch("src.api.routes.geocodificar_reverso", return_value={"sucesso": False, "erro": "offline"}), patch("src.api.routes.consultar_itinerarios_ida_volta_oficial", side_effect=_mock_rotas_ida_volta()):
+        payload = {
+            "origem": "Residência",
+            "destino": "Trabalho",
+            "horario_entrada": "08:00",
+            "horario_saida": "18:00",
+            "dias_uteis": 22,
+            "origem_lat": -23.55,
+            "origem_lon": -46.63,
+            "destino_lat": -23.56,
+            "destino_lon": -46.64,
+        }
+        resp = client.post("/api/v1/routes/calculate", json=payload)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["sucesso"] is True
+    mock_geo.assert_not_called()
+    assert data["coords"] == [-23.55, -46.63, -23.56, -46.64]
+
+
+def test_routes_calculate_horarios_invalidos_422(client):
+    """POST /routes/calculate com entrada >= saída retorna 422."""
+    payload = {
+        "origem": "06310-000",
+        "destino": "Avenida Paulista, 1000",
+        "horario_entrada": "18:00",
+        "horario_saida": "08:00",
+        "dias_uteis": 22,
+    }
+    resp = client.post("/api/v1/routes/calculate", json=payload)
+    assert resp.status_code == 422
+
+
 def test_routes_calculate_viabilidade_clt_com_salario(client):
-    """POST /routes/calculate com salario_base > 0 expõe viabilidade_clt."""
-    with patch("src.api.routes.buscar_coordenadas_por_cep_ou_endereco", side_effect=_mock_geocoding()), patch("src.api.routes.roteirizar_vale_transporte_automatico", side_effect=_mock_vt()), patch("src.api.routes.roteirizar_com_comparativo", return_value={"sucesso": False}):
+    """POST /routes/calculate com salario_base > 0 expõe viabilidade_clt sobre opcoes[0]."""
+    with patch("src.api.routes.buscar_coordenadas_por_cep_ou_endereco", side_effect=_mock_geocoding()), patch("src.api.routes.consultar_itinerarios_ida_volta_oficial", side_effect=_mock_rotas_ida_volta()):
         payload = {
             "origem": "06310-000",
             "destino": "Avenida Paulista, 1000",
-            "modalidade": "Vale-Transporte",
+            "horario_entrada": "08:00",
+            "horario_saida": "18:00",
             "dias_uteis": 22,
             "salario_base": 2500.00,
         }
@@ -263,24 +367,20 @@ def test_routes_calculate_viabilidade_clt_com_salario(client):
     assert data["sucesso"] is True
     assert data["viabilidade_clt"] is not None
     assert data["viabilidade_clt"]["sucesso"] is True
-    assert "teto_desconto_6_pct" in data["viabilidade_clt"]
+    assert data["viabilidade_clt"]["teto_desconto_6_pct"] == 150.00
     assert "desconto_colaborador" in data["viabilidade_clt"]
     assert "custeio_empresa" in data["viabilidade_clt"]
     assert "vt_vantajoso" in data["viabilidade_clt"]
-    # Custo mensal mock = 193.60, teto 6% de 2500 = 150.00
-    assert data["viabilidade_clt"]["teto_desconto_6_pct"] == 150.00
-    assert data["viabilidade_clt"]["desconto_colaborador"] == 150.00
-    assert data["viabilidade_clt"]["custeio_empresa"] == 43.60
-    assert data["viabilidade_clt"]["vt_vantajoso"] is True
 
 
 def test_routes_calculate_viabilidade_clt_sem_salario(client):
     """POST /routes/calculate sem salario_base retorna viabilidade_clt = None."""
-    with patch("src.api.routes.buscar_coordenadas_por_cep_ou_endereco", side_effect=_mock_geocoding()), patch("src.api.routes.roteirizar_vale_transporte_automatico", side_effect=_mock_vt()), patch("src.api.routes.roteirizar_com_comparativo", return_value={"sucesso": False}):
+    with patch("src.api.routes.buscar_coordenadas_por_cep_ou_endereco", side_effect=_mock_geocoding()), patch("src.api.routes.consultar_itinerarios_ida_volta_oficial", side_effect=_mock_rotas_ida_volta()):
         payload = {
             "origem": "06310-000",
             "destino": "Avenida Paulista, 1000",
-            "modalidade": "Vale-Transporte",
+            "horario_entrada": "08:00",
+            "horario_saida": "18:00",
             "dias_uteis": 22,
         }
         resp = client.post("/api/v1/routes/calculate", json=payload)

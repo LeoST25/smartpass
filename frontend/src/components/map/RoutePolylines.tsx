@@ -1,5 +1,5 @@
 /**
- * Polilinhas da rota com cores por modal.
+ * Polilinhas da rota (ida ou volta, conforme seletor) com cores por modal.
  */
 
 import { Polyline, Tooltip } from 'react-leaflet';
@@ -10,9 +10,11 @@ import type { Leg } from '../../types/api';
 export function RoutePolylines() {
   const { state } = useAppState();
 
-  if (!state.result?.vt?.legs) return null;
+  const opcao = state.result?.opcoes?.[state.selectedOptionIndex ?? 0];
+  if (!opcao) return null;
 
-  const legs = state.result.vt.legs;
+  const sentido = state.mapDirection === 'ida' ? opcao.ida : opcao.volta;
+  const legs = sentido.legs || [];
 
   return (
     <>

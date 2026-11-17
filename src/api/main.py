@@ -64,13 +64,17 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """Handler para ValidationError (Pydantic) — retorna detalhes de validação."""
+    """Handler para ValidationError (Pydantic) — retorna detalhes de validação JSON-safe."""
+    detalhes = [
+        {"loc": list(err.get("loc", [])), "msg": str(err.get("msg", "")), "type": str(err.get("type", ""))}
+        for err in exc.errors()
+    ]
     return JSONResponse(
         status_code=422,
         content={
             "sucesso": False,
             "erro": "Erro de validação nos dados de entrada.",
-            "detalhes": exc.errors(),
+            "detalhes": detalhes,
         },
     )
 

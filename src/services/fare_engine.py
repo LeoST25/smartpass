@@ -826,3 +826,238 @@ def comparar_rotas(
             "rota_mais_economica": None,
             "economia_mensal": 0.0,
         }
+
+
+# ---------------------------------------------------------------------------
+# Motor Ida + Volta por horário real (Roteirizador Individual)
+# ---------------------------------------------------------------------------
+def calcular_custo_por_sentido(
+    legs: list[dict],
+    config: FareConfig | dict | None = None,
+) -> dict:
+    """Calcula o custo de UM sentido (ida ou volta) com integração temporal BU/TOP.
+
+    Reutiliza ``calcular_custo_com_integracao`` (que resolve a tarifa oficial por leg
+    e aplica as regras de integração) devolvendo apenas o ``custo_trecho`` — sem a
+    multiplicação diária (×2) nem mensal (×dias), que agora são compostas pelo motor
+    ida+volta (``ranquear_opcoes_ida_volta``).
+
+    Args:
+        legs: Lista de pernas de um único sentido.
+        config: FareConfig/dict para override de tarifas/janela.
+
+    Returns:
+        dict: ``{"sucesso": bool, "custo_trecho": float, "detalhes": list,
+        "detalhamento_tarifario": list[str], "memoria_calculo": list[str],
+        "justificativa": str, "alertas_tarifa": list[str]}``.
+    """
+    res = calcular_custo_com_integracao(legs, dias_uteis=1, config=config)
+    if not res.get("sucesso"):
+        return res
+    return {
+        "sucesso": True,
+        "custo_trecho": round(float(res.get("custo_trecho", 0.0)), 2),
+        "detalhes": res.get("detalhes", []),
+        "detalhamento_tarifario": res.get("detalhamento_tarifario", []),
+        "memoria_calculo": res.get("memoria_calculo", []),
+        "justificativa": res.get("justificativa", ""),
+        "alertas_tarifa": res.get("alertas_tarifa", []),
+        "catalogo_versao": res.get("catalogo_versao"),
+    }
+
+
+def _avaliar_sentido(itinerarios: list[dict], config: FareConfig) -> list[dict]:
+    """Avalia itinerários de um único sentido (ida ou volta) com custo e métricas.
+
+    Args:
+        itinerarios: Lista de itinerários OTP (contrato de ``_extrair_todos_itinerarios_otp``).
+        config: FareConfig resolvida.
+
+    Returns:
+        list[dict]: Lista de itinerários avaliados com ``custo_trecho`` e métricas normalizadas.
+    """
+    avaliados: list[dict] = []
+    for idx, itin in enumerate(itinerarios or []):
+        legs = itin.get("legs") or itin.get("linhas") or []
+
+        caminhada = itin.get("caminhada_km")
+        if caminhada is None:
+            try:
+                caminhada = sum(float(l.get("distance") or 0) for l in itin.get("legs", []) if str(l.get("mode", "")).upper() == "WALK") / 1000
+            except Exception:
+                caminhada = 0.0
+        try:
+            caminhada = float(caminhada or 0)
+        except Exception:
+            caminhada = 0.0
+
+        baldeacoes = itin.get("baldeacoes")
+        if baldeacoes is None:
+            baldeacoes = max(len([l for l in legs if l.get("route") or l.get("linha")]) - 1, 0)
+        try:
+            baldeacoes = int(baldeacoes or 0)
+        except Exception:
+            baldeacoes = 0
+
+        duracao = itin.get("duracao_total_min")
+        if duracao is None:
+            duracao = itin.get("duracao_min", itin.get("tempo_min", itin.get("duration_min", 0)))
+        try:
+            duracao = int(round(float(duracao or 0)))
+        except Exception:
+            duracao = 0
+
+        res = calcular_custo_por_sentido(legs, config=config)
+        custo_trecho = round(float(res.get("custo_trecho", 0.0)), 2) if res.get("sucesso") else 0.0
+
+        avaliados.append(
+            {
+                "indice": idx,
+                "legs": legs,
+                "legs_transito": itin.get("legs_transito") or [l for l in legs if l.get("route") or l.get("linha")],
+                "linhas": itin.get("linhas", []),
+                "distancia_km": round(float(itin.get("distancia_km", 0) or 0), 2),
+                "caminhada_km": round(caminhada, 2),
+                "baldeacoes": baldeacoes,
+                "duracao_min": duracao,
+                "resumo_trajeto": itin.get("resumo_trajeto", ""),
+                "geometria_fallback": itin.get("geometria_fallback", True),
+                "horario_partida": itin.get("horario_partida"),
+                "horario_chegada": itin.get("horario_chegada"),
+                "fonte": itin.get("fonte", "OTP"),
+                "custo_trecho": custo_trecho,
+                "detalhes": res.get("detalhes", []),
+                "detalhamento_tarifario": res.get("detalhamento_tarifario", []),
+                "memoria_calculo": res.get("memoria_calculo", []),
+                "justificativa": res.get("justificativa", ""),
+                "alertas_tarifa": res.get("alertas_tarifa", []),
+            }
+        )
+    return avaliados
+
+
+def _melhor_sentido(avaliados: list[dict], categoria: str) -> dict:
+    """Seleciona o melhor itinerário de um sentido conforme a categoria."""
+    if categoria == "mais_economica":
+        return min(avaliados, key=lambda a: (a["custo_trecho"], a["duracao_min"] or 9999))
+    if categoria == "mais_rapida":
+        return min(avaliados, key=lambda a: (a["duracao_min"] if a["duracao_min"] > 0 else 9999, a["custo_trecho"]))
+    # menor_caminhada
+    return min(avaliados, key=lambda a: (a["caminhada_km"], a["duracao_min"] if a["duracao_min"] > 0 else 9999))
+
+
+def _montar_sentido(avaliado: dict) -> dict:
+    """Monta o sub-objeto ``SentidoRota`` (ida/volta) para o contrato da API."""
+    return {
+        "legs": avaliado["legs"],
+        "legs_transito": avaliado["legs_transito"],
+        "linhas": avaliado["linhas"],
+        "distancia_km": avaliado["distancia_km"],
+        "caminhada_km": avaliado["caminhada_km"],
+        "baldeacoes": avaliado["baldeacoes"],
+        "duracao_min": avaliado["duracao_min"],
+        "resumo_trajeto": avaliado["resumo_trajeto"],
+        "geometria_fallback": avaliado["geometria_fallback"],
+        "horario_partida": avaliado["horario_partida"],
+        "horario_chegada": avaliado["horario_chegada"],
+        "custo_trecho": avaliado["custo_trecho"],
+        "detalhes": avaliado["detalhes"],
+        "detalhamento_tarifario": avaliado["detalhamento_tarifario"],
+        "alertas_tarifa": avaliado["alertas_tarifa"],
+        "fonte": avaliado["fonte"],
+    }
+
+
+def ranquear_opcoes_ida_volta(
+    ida_itinerarios: list[dict],
+    volta_itinerarios: list[dict],
+    dias_uteis: int = 22,
+    config: FareConfig | dict | None = None,
+) -> dict:
+    """Ranqueia opções de jornada (ida + volta) por pareamento de categoria.
+
+    Ranqueia ida e volta **separadamente** (mais econômica, mais rápida, menor
+    caminhada) e **pareia por categoria** (econômica↔econômica, rápida↔rápida,
+    menor_caminhada↔menor_caminhada), gerando até 3 opções coerentes.
+
+    O custo de cada sentido usa ``calcular_custo_por_sentido`` (1 sentido); a opção
+    consolida ``custo_diario = custo_trecho_ida + custo_trecho_volta`` e
+    ``custo_mensal = custo_diario * dias_uteis``.
+
+    Args:
+        ida_itinerarios: Itinerários do sentido ida (até 3).
+        volta_itinerarios: Itinerários do sentido volta (até 3).
+        dias_uteis: Dias úteis para o custo mensal (1-31).
+        config: FareConfig/dict para override de tarifas/janela.
+
+    Returns:
+        dict: ``{"sucesso": bool, "opcoes": list[dict], "memoria_calculo": list[str],
+        "justificativa": str}``. Cada opção contém ``tipo``, ``categorias``, ``ida``,
+        ``volta``, ``custo_diario``, ``custo_mensal``, ``tempo_total_min``,
+        ``baldeacoes_total``, ``caminhada_total_km`` e ``resumo``.
+    """
+    try:
+        cfg = _resolve_config(config)
+        dias = int(dias_uteis or 22)
+        dias = max(1, min(dias, 31))
+
+        ida = _avaliar_sentido(ida_itinerarios, cfg)
+        volta = _avaliar_sentido(volta_itinerarios, cfg)
+
+        if not ida or not volta:
+            return {
+                "sucesso": False,
+                "opcoes": [],
+                "memoria_calculo": ["Ranqueamento indisponível: sem itinerários válidos de ida ou volta."],
+                "justificativa": "Sem itinerários de ida/volta não é possível ranquear opções.",
+            }
+
+        categorias = ["mais_economica", "mais_rapida", "menor_caminhada"]
+        vistos: dict[tuple[int, int], dict] = {}
+        memoria: list[str] = []
+
+        for categoria in categorias:
+            ida_sel = _melhor_sentido(ida, categoria)
+            volta_sel = _melhor_sentido(volta, categoria)
+            chave = (ida_sel["indice"], volta_sel["indice"])
+
+            if chave in vistos:
+                vistos[chave]["categorias"].append(categoria)
+                continue
+
+            custo_diario = round(ida_sel["custo_trecho"] + volta_sel["custo_trecho"], 2)
+            custo_mensal = round(custo_diario * dias, 2)
+            tempo_total = ida_sel["duracao_min"] + volta_sel["duracao_min"]
+            caminhada_total = round(ida_sel["caminhada_km"] + volta_sel["caminhada_km"], 2)
+            baldeacoes_total = ida_sel["baldeacoes"] + volta_sel["baldeacoes"]
+
+            vistos[chave] = {
+                "tipo": categoria,
+                "categorias": [categoria],
+                "ida": _montar_sentido(ida_sel),
+                "volta": _montar_sentido(volta_sel),
+                "custo_diario": custo_diario,
+                "custo_mensal": custo_mensal,
+                "tempo_total_min": tempo_total,
+                "baldeacoes_total": baldeacoes_total,
+                "caminhada_total_km": caminhada_total,
+                "resumo": categoria.replace("_", " ").title(),
+            }
+            memoria.append(
+                f"Opção {categoria}: ida R$ {ida_sel['custo_trecho']:.2f} + volta R$ {volta_sel['custo_trecho']:.2f} = diário R$ {custo_diario:.2f}; mensal ({dias}d) R$ {custo_mensal:.2f}."
+            )
+
+        opcoes = list(vistos.values())
+        justificativa = (
+            f"{len(opcoes)} opção(ões) ranqueada(s) (ida+volta) com integração BU/TOP e {dias} dias úteis."
+        )
+
+        return {"sucesso": True, "opcoes": opcoes, "memoria_calculo": memoria, "justificativa": justificativa}
+
+    except Exception as exc:
+        return {
+            "sucesso": False,
+            "opcoes": [],
+            "memoria_calculo": [f"Falha no ranqueamento ida+volta: {exc}"],
+            "justificativa": "Erro inesperado ao ranquear opções.",
+        }

@@ -24,8 +24,10 @@ export function AddressAutocomplete({ label, value, onChange }: AddressAutocompl
 
   // Debounce 300ms para busca
   useEffect(() => {
-    if (query.length < 3) {
+    // Quando um candidato já foi selecionado, não refaz a busca (evita reabrir o dropdown).
+    if (query.length < 3 || value) {
       setSuggestions([]);
+      setIsOpen(false);
       return;
     }
 
@@ -44,7 +46,7 @@ export function AddressAutocomplete({ label, value, onChange }: AddressAutocompl
     }, 300);
 
     return () => clearTimeout(timeoutId);
-  }, [query]);
+  }, [query, value]);
 
   // Navegação por teclado
   useEffect(() => {

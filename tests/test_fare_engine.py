@@ -2,7 +2,13 @@
 
 import pytest
 
-from src.services.fare_engine import FareConfig, calcular_custo_com_integracao, comparar_rotas
+from src.services.fare_engine import (
+    FareConfig,
+    calcular_custo_com_integracao,
+    calcular_custo_por_sentido,
+    comparar_rotas,
+    ranquear_opcoes_ida_volta,
+)
 
 
 # Config determinística para asserções (independe de .env local)
@@ -434,3 +440,124 @@ def test_gtfs_fare_sobrescreve_tabela():
     # 1.23 + complemento 5.00 (cap) = 6.23 (teto não atingido pois GTFS baixo)
     assert res["custo_trecho"] == pytest.approx(6.23)
     assert res["detalhes"][0]["fonte"] == "GTFS Oficial (fare_attributes)"
+
+
+# ---------------------------------------------------------------------------
+# 11. Motor Ida + Volta por sentido — calcular_custo_por_sentido
+# ---------------------------------------------------------------------------
+def test_calcular_custo_por_sentido_retorna_so_trecho():
+    legs = [_bus("Ônibus 175", inicio=0), _trilho("Metrô L4", inicio=20)]
+    res = calcular_custo_por_sentido(legs, config=CFG)
+    assert res["sucesso"] is True
+    assert res["custo_trecho"] == pytest.approx(9.20)
+    # não deve expor diário/mensal (composição é do motor ida+volta)
+    assert "custo_diario" not in res
+    assert "custo_mensal" not in res
+    assert "detalhes" in res and len(res["detalhes"]) == 2
+    assert "detalhamento_tarifario" in res
+
+
+def test_calcular_custo_por_sentido_fallback_vazio():
+    res = calcular_custo_por_sentido([], config=CFG)
+    assert res["sucesso"] is False
+
+
+# ---------------------------------------------------------------------------
+# 12. Ranqueador ida+volta por pareamento de categoria
+# ---------------------------------------------------------------------------
+def _itin(legs, duracao, caminhada, baldeacoes, resumo):
+    return {
+        "legs": legs,
+        "legs_transito": legs,
+        "linhas": [],
+        "distancia_km": 10.0,
+        "caminhada_km": caminhada,
+        "baldeacoes": baldeacoes,
+        "duracao_min": duracao,
+        "duracao_total_min": duracao,
+        "resumo_trajeto": resumo,
+        "geometria_fallback": True,
+        "horario_partida": "07:30",
+        "horario_chegada": "08:00",
+    }
+
+
+def test_ranquear_opcoes_ida_volta_pareia_por_categoria():
+    # ida: econômica = ônibus (4.40), rápida = trilho (5.00), menor caminhada = ônibus
+    ida = [
+        _itin([_bus("Ônibus 175", inicio=0)], 40, 0.5, 0, "ida_economica"),
+        _itin([_trilho("Metrô L4", inicio=0)], 25, 0.8, 0, "ida_rapida"),
+    ]
+    volta = [
+        _itin([_bus("Ônibus 175", inicio=0)], 45, 0.5, 0, "volta_economica"),
+        _itin([_trilho("Metrô L4", inicio=0)], 30, 0.8, 0, "volta_rapida"),
+    ]
+    res = ranquear_opcoes_ida_volta(ida, volta, dias_uteis=22, config=CFG)
+    assert res["sucesso"] is True
+    assert len(res["opcoes"]) >= 2
+
+    economica = next(o for o in res["opcoes"] if o["tipo"] == "mais_economica")
+    rapida = next(o for o in res["opcoes"] if o["tipo"] == "mais_rapida")
+
+    # pareamento por categoria: econômica↔econômica, rápida↔rápida
+    assert economica["ida"]["resumo_trajeto"] == "ida_economica"
+    assert economica["volta"]["resumo_trajeto"] == "volta_economica"
+    assert rapida["ida"]["resumo_trajeto"] == "ida_rapida"
+    assert rapida["volta"]["resumo_trajeto"] == "volta_rapida"
+
+
+def test_ranquear_opcoes_custo_diario_e_mensal():
+    ida = [_itin([_bus("Ônibus 175", inicio=0)], 40, 0.5, 0, "ida")]
+    volta = [_itin([_trilho("Metrô L4", inicio=0)], 30, 0.8, 0, "volta")]
+    res = ranquear_opcoes_ida_volta(ida, volta, dias_uteis=20, config=CFG)
+    assert res["sucesso"] is True
+    opcao = res["opcoes"][0]
+    # ida ônibus 4.40 + volta trilho 5.00 = 9.40 diário
+    assert opcao["ida"]["custo_trecho"] == pytest.approx(4.40)
+    assert opcao["volta"]["custo_trecho"] == pytest.approx(5.00)
+    assert opcao["custo_diario"] == pytest.approx(9.40)
+    assert opcao["custo_mensal"] == pytest.approx(9.40 * 20)
+
+
+def test_ranquear_opcoes_menor_caminhada():
+    ida = [
+        _itin([_bus("Ônibus 175", inicio=0)], 50, 1.8, 0, "ida_economica"),
+        _itin([_trilho("Metrô L4", inicio=0)], 25, 0.8, 0, "ida_rapida"),
+        _itin([_trilho("Metrô L2", inicio=0)], 35, 0.2, 0, "ida_menor_caminhada"),
+    ]
+    volta = [
+        _itin([_bus("Ônibus 175", inicio=0)], 50, 1.8, 0, "volta_economica"),
+        _itin([_trilho("Metrô L4", inicio=0)], 25, 0.8, 0, "volta_rapida"),
+        _itin([_trilho("Metrô L2", inicio=0)], 35, 0.2, 0, "volta_menor_caminhada"),
+    ]
+    res = ranquear_opcoes_ida_volta(ida, volta, dias_uteis=22, config=CFG)
+    assert res["sucesso"] is True
+    menor = next(o for o in res["opcoes"] if o["tipo"] == "menor_caminhada")
+    assert menor["ida"]["resumo_trajeto"] == "ida_menor_caminhada"
+    assert menor["volta"]["resumo_trajeto"] == "volta_menor_caminhada"
+    assert menor["caminhada_total_km"] == pytest.approx(0.4)
+
+
+def test_ranquear_opcoes_dedup_multi_badge():
+    # quando a mesma rota vence mais de uma categoria, ela é colapsada em uma opção
+    # com `categorias` múltiplas (não duplicada).
+    ida = [
+        _itin([_bus("Ônibus 175", inicio=0)], 40, 0.5, 0, "ida_bus"),
+        _itin([_trilho("Metrô L4", inicio=0)], 25, 0.8, 0, "ida_trilho"),
+    ]
+    volta = [
+        _itin([_bus("Ônibus 175", inicio=0)], 40, 0.5, 0, "volta_bus"),
+        _itin([_trilho("Metrô L4", inicio=0)], 25, 0.8, 0, "volta_trilho"),
+    ]
+    res = ranquear_opcoes_ida_volta(ida, volta, dias_uteis=22, config=CFG)
+    assert res["sucesso"] is True
+    assert len(res["opcoes"]) == 2
+    economica = next(o for o in res["opcoes"] if o["tipo"] == "mais_economica")
+    # ônibus é a mais econômica E a de menor caminhada → categorias mescladas
+    assert "menor_caminhada" in economica["categorias"]
+
+
+def test_ranquear_opcoes_sem_itinerarios():
+    res = ranquear_opcoes_ida_volta([], [], dias_uteis=22, config=CFG)
+    assert res["sucesso"] is False
+    assert res["opcoes"] == []

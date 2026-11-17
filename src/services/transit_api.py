@@ -15,7 +15,7 @@ uma mensagem genérica e acionável.
 
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -54,6 +54,91 @@ def _coordenada_na_rmsp(lat: float, lon: float) -> bool:
         )
     except (TypeError, ValueError):
         return False
+
+
+def _normalizar_instante(valor) -> str | None:
+    """Normaliza um instante (epoch millis ou ISO) para ``HH:MM`` em America/Sao_Paulo.
+
+    O scalar ``DateTime`` do OTP GraphQL pode serializar como epoch em milissegundos
+    (int/float) ou como string ISO-8601; ambos são tratados de forma defensiva.
+
+    Args:
+        valor: ``startTime``/``endTime`` de uma leg (epoch millis ou ISO string).
+
+    Returns:
+        str | None: Horário local ``HH:MM`` ou ``None`` quando indisponível.
+    """
+    if valor is None:
+        return None
+    try:
+        if isinstance(valor, (int, float)):
+            return datetime.fromtimestamp(float(valor) / 1000, TIMEZONE_RMSP).strftime("%H:%M")
+        if isinstance(valor, str) and valor.strip():
+            s = valor.strip()
+            # tenta ISO com offset; senão devolve como veio
+            try:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=TIMEZONE_RMSP)
+                return dt.astimezone(TIMEZONE_RMSP).strftime("%H:%M")
+            except ValueError:
+                return s
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return None
+
+
+def _data_util_referencia(uf: str = "SP", municipio: str = "São Paulo", data_base: date | None = None) -> str:
+    """Retorna a data do próximo dia útil (seg–sex, sem feriados) em ``YYYY-MM-DD``.
+
+    Reutiliza ``calendar_engine.listar_feriados`` para não divergir do ``dias_uteis``
+    do cálculo mensal: fins de semana **e** feriados (nacionais + municipais SP) são
+    pulados, garantindo que a consulta OTP caia num dia com serviço real.
+
+    Args:
+        uf: UF para resolução de feriados municipais (default ``"SP"``).
+        municipio: Município para resolução de feriados (default ``"São Paulo"``).
+        data_base: Data de referência opcional (default: hoje em America/Sao_Paulo).
+
+    Returns:
+        str: Data ``YYYY-MM-DD`` do primeiro dia útil a partir de ``data_base``.
+    """
+    from src.services.calendar_engine import listar_feriados
+
+    d = data_base or datetime.now(TIMEZONE_RMSP).date()
+    feriados_cache: dict[int, set[date]] = {}
+
+    for _ in range(30):  # teto de segurança
+        if d.weekday() >= 5:  # sábado/domingo
+            d += timedelta(days=1)
+            continue
+        if d.year not in feriados_cache:
+            res = listar_feriados(d.year, uf, municipio)
+            feriados_cache[d.year] = {f["data"] for f in res.get("feriados", [])}
+        if d in feriados_cache[d.year]:
+            d += timedelta(days=1)
+            continue
+        return d.isoformat()
+    return d.isoformat()
+
+
+def _montar_data_hora(data_ref: str, horario: str) -> str:
+    """Combina data ``YYYY-MM-DD`` + ``HH:MM`` em ISO tz-aware America/Sao_Paulo.
+
+    Args:
+        data_ref: Data no formato ``YYYY-MM-DD``.
+        horario: Horário no formato ``HH:MM`` (validado no schema).
+
+    Returns:
+        str: ``YYYY-MM-DDTHH:MM:00-03:00``.
+    """
+    hh, mm = horario.split(":")
+    dt = datetime.combine(
+        date.fromisoformat(data_ref),
+        time(hour=int(hh), minute=int(mm)),
+        tzinfo=TIMEZONE_RMSP,
+    )
+    return dt.isoformat(timespec="seconds")
 
 
 def decodificar_polyline(polyline: str | None) -> list[tuple[float, float]]:
@@ -110,21 +195,39 @@ def decodificar_polyline(polyline: str | None) -> list[tuple[float, float]]:
     return pontos
 
 
-def _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon):
+def _montar_consulta_otp(
+    origem_lat,
+    origem_lon,
+    destino_lat,
+    destino_lon,
+    data_hora: str | None = None,
+    arrive_by: bool = False,
+):
     """Monta a consulta GraphQL compatível com OTP 2.x — apenas pernas e rotas.
 
     O campo ``fare`` é intencionalmente omitido: o schema do OTP 2.x não garante
     esse campo no tipo ``Itinerary`` quando o grafo não é buildado com
     ``fare_attributes.txt``, e a query inteira falha. A tarifa é resolvida
     exclusivamente em ``fare_engine.py`` (GTFS > catálogo RMSP > base).
+
+    Args:
+        origem_lat/origem_lon/destino_lat/destino_lon: Coordenadas WGS84.
+        data_hora: ISO tz-aware (default: agora em America/Sao_Paulo).
+        arrive_by: ``True`` monta ``latestArrival`` (chegar até o horário — ida);
+            ``False`` monta ``earliestDeparture`` (sair a partir do horário — volta).
+
+    Returns:
+        str: Documento GraphQL.
     """
-    data_hora = datetime.now(TIMEZONE_RMSP).isoformat(timespec="minutes")
+    if data_hora is None:
+        data_hora = datetime.now(TIMEZONE_RMSP).isoformat(timespec="minutes")
+    campo_data = "latestArrival" if arrive_by else "earliestDeparture"
     return f"""
     {{
       planConnection(
         origin: {{ location: {{ coordinate: {{ latitude: {origem_lat}, longitude: {origem_lon} }} }} }}
         destination: {{ location: {{ coordinate: {{ latitude: {destino_lat}, longitude: {destino_lon} }} }} }}
-        dateTime: {{ earliestDeparture: \"{data_hora}\" }}
+        dateTime: {{ {campo_data}: \"{data_hora}\" }}
         modes: {{
           direct: [WALK]
           transit: {{ transit: [{{ mode: BUS }}, {{ mode: RAIL }}, {{ mode: SUBWAY }}, {{ mode: TRAM }}] }}
@@ -137,6 +240,8 @@ def _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon):
               mode
               distance
               duration
+              startTime
+              endTime
               from {{ name lat lon }}
               to {{ name lat lon }}
               route {{ gtfsId shortName longName agency {{ gtfsId name }} }}
@@ -147,6 +252,11 @@ def _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon):
       }}
     }}
     """
+
+
+def _consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon):
+    """Compat: monta a consulta GraphQL com partida imediata (``earliestDeparture``)."""
+    return _montar_consulta_otp(origem_lat, origem_lon, destino_lat, destino_lon)
 
 
 def _nome_linha(leg):
@@ -199,6 +309,8 @@ def _enriquecer_leg(leg: dict) -> dict:
     agencia = _agencia_leg(leg)
     enriched["agency"] = agencia
     enriched["codigo_linha"] = _codigo_linha(leg)
+    enriched["horario_inicio"] = _normalizar_instante(leg.get("startTime"))
+    enriched["horario_fim"] = _normalizar_instante(leg.get("endTime"))
     # garante from/to com lat/lon quando OTP retornar
     for k in ("from", "to"):
         v = enriched.get(k)
@@ -333,6 +445,9 @@ def _extrair_todos_itinerarios_otp(payload):
         if baldeacoes:
             resumo += f". {baldeacoes} baldeação(ões) sugerida(s)."
 
+        horario_partida = (legs[0].get("horario_inicio") if legs else None)
+        horario_chegada = (legs[-1].get("horario_fim") if legs else None)
+
         itinerarios.append(
             {
                 "legs": legs,
@@ -345,6 +460,8 @@ def _extrair_todos_itinerarios_otp(payload):
                 "duracao_total_min": duracao_min,
                 "resumo_trajeto": resumo,
                 "geometria_fallback": all(leg.get("geometria_fallback", True) for leg in legs),
+                "horario_partida": horario_partida,
+                "horario_chegada": horario_chegada,
             }
         )
 
@@ -435,4 +552,156 @@ def consultar_todos_itinerarios_oficial(origem_lat, origem_lon, destino_lat, des
             "fonte": "Estimativa de contingência",
             "erro": "Não foi possível obter as rotas oficiais agora.",
             "itinerarios": [],
+        }
+
+
+# -----------------------------------------------------------------------------
+# Ida + Volta por horário real de jornada (Roteirizador Individual)
+# -----------------------------------------------------------------------------
+@st_cache_data(ttl=600, show_spinner=False)
+def resolver_itinerarios_ida_volta(
+    origem_lat,
+    origem_lon,
+    destino_lat,
+    destino_lon,
+    horario_entrada,
+    horario_saida,
+    data_referencia,
+):
+    """Obtém itinerários de ida e de volta via OTP usando horários reais de jornada.
+
+    Executa **duas** consultas GraphQL sobre a mesma data útil de referência:
+    - **Ida** (chegar até ``horario_entrada``): ``arrive_by=True`` → ``latestArrival``.
+    - **Volta** (sair a partir de ``horario_saida``): ``arrive_by=False`` → ``earliestDeparture``.
+
+    Cache 10min (TTL canônico de roteamento); a chave inclui ``data_referencia`` e
+    horários para evitar colisão entre jornadas distintas.
+
+    Args:
+        origem_lat/origem_lon/destino_lat/destino_lon: Coordenadas WGS84.
+        horario_entrada: ``"HH:MM"`` de chegada no trabalho.
+        horario_saida: ``"HH:MM"`` de saída do trabalho.
+        data_referencia: ``"YYYY-MM-DD"`` de um dia útil.
+
+    Returns:
+        dict: ``{"ida": list[dict], "volta": list[dict]}`` com até 3 itinerários cada.
+    """
+    data_hora_ida = _montar_data_hora(data_referencia, horario_entrada)
+    data_hora_volta = _montar_data_hora(data_referencia, horario_saida)
+
+    def _consultar(dh, arrive_by):
+        resp = requests.post(
+            OTP_GRAPHQL_URL,
+            json={
+                "query": _montar_consulta_otp(
+                    origem_lat, origem_lon, destino_lat, destino_lon, data_hora=dh, arrive_by=arrive_by
+                )
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return _extrair_todos_itinerarios_otp(resp.json())
+
+    return {
+        "ida": _consultar(data_hora_ida, arrive_by=True),
+        "volta": _consultar(data_hora_volta, arrive_by=False),
+    }
+
+
+def _itinerario_fallback_sintetico(
+    origem_lat,
+    origem_lon,
+    destino_lat,
+    destino_lon,
+    endereco_origem,
+    endereco_destino,
+):
+    """Itinerário sintético de contingência (OTP offline) com legs enriquecidas.
+
+    Garante que o ranqueador de opções não retorne ``sucesso=False`` em modo offline:
+    produz um itinerário com uma única leg de ônibus entre os extremos reais,
+    sem geometria (``geometria_fallback=True``), sinalizando estimativa provisória.
+
+    Returns:
+        dict: Itinerário no mesmo contrato de ``_extrair_todos_itinerarios_otp``.
+    """
+    leg = {
+        "mode": "BUS",
+        "linha": "Transporte público (estimativa)",
+        "route": {"shortName": "Estimativa"},
+        "distance": 1000,
+        "duration": 1800,
+        "from": {"name": endereco_origem, "lat": float(origem_lat), "lon": float(origem_lon)},
+        "to": {"name": endereco_destino, "lat": float(destino_lat), "lon": float(destino_lon)},
+        "pontos": [],
+        "geometria_fallback": True,
+        "codigo_linha": "",
+        "agency": {"gtfsId": "", "name": ""},
+    }
+    return {
+        "legs": [leg],
+        "legs_transito": [leg],
+        "linhas": [{"linha": "Transporte público (estimativa)", "valor_unitario": round(VT_TARIFA_PADRAO, 2), "quantidade_dia": 2, "codigo_linha": "", "operadora": "—"}],
+        "distancia_km": 10.0,
+        "caminhada_km": 0.0,
+        "baldeacoes": 0,
+        "duracao_min": 30,
+        "duracao_total_min": 30,
+        "resumo_trajeto": "Estimativa provisória de transporte público para validação manual.",
+        "geometria_fallback": True,
+        "horario_partida": None,
+        "horario_chegada": None,
+    }
+
+
+def consultar_itinerarios_ida_volta_oficial(
+    origem_lat,
+    origem_lon,
+    destino_lat,
+    destino_lon,
+    horario_entrada,
+    horario_saida,
+    endereco_origem="",
+    endereco_destino="",
+    uf="SP",
+    municipio="São Paulo",
+):
+    """Consulta OTP para ida+volta por horário real, com fallback de contingência.
+
+    Erro técnico fica apenas no logging do servidor; o usuário recebe mensagem
+    genérica e o fluxo cai em estimativa provisória (LGPD stateless).
+
+    Returns:
+        dict: ``{"sucesso": bool, "ida": list, "volta": list, "fonte": str,
+        "data_referencia": str, "erro": str|None}``.
+    """
+    data_referencia = _data_util_referencia(uf=uf, municipio=municipio)
+    try:
+        resultado = resolver_itinerarios_ida_volta(
+            origem_lat, origem_lon, destino_lat, destino_lon,
+            horario_entrada, horario_saida, data_referencia,
+        )
+        return {
+            "sucesso": True,
+            "fonte": "OpenTripPlanner (GTFS local)",
+            "data_referencia": data_referencia,
+            "ida": resultado["ida"],
+            "volta": resultado["volta"],
+            "erro": None,
+        }
+    except (requests.RequestException, requests.Timeout, requests.ConnectionError, ValueError, TypeError, RuntimeError) as exc:
+        logger.warning(
+            "Falha na consulta OTP ida/volta (%.5f,%.5f -> %.5f,%.5f): %s",
+            origem_lat, origem_lon, destino_lat, destino_lon, exc, exc_info=True,
+        )
+        fallback = _itinerario_fallback_sintetico(
+            origem_lat, origem_lon, destino_lat, destino_lon, endereco_origem, endereco_destino
+        )
+        return {
+            "sucesso": False,
+            "fonte": "Estimativa de contingência",
+            "data_referencia": data_referencia,
+            "ida": [fallback],
+            "volta": [fallback],
+            "erro": "Não foi possível obter a rota oficial agora. Exibindo estimativa provisória para validação manual.",
         }
