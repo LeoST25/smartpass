@@ -16,4 +16,4 @@ Você é o Guardião Técnico do SmartPass. Antes de aprovar qualquer mudança, 
    - Em seguida, monitore os workflows do GitHub Actions executando `gh pr checks --watch` no PR recém-criado.
    - **Regra de Merge:**
      - Se qualquer workflow falhar (`fail`), **aborte o merge**, leia os logs do erro com `gh run view --log-failed` e reporte exatamente o que quebrou.
-     - Se **100% dos checks forem aprovados**, execute `gh pr merge --squash --delete-branch` (nunca use `--admin` para forçar merge) e atualize a branch local (`git checkout <branch_destino> && git pull`).
+     - Se **100% dos checks forem aprovados**, execute `gh pr merge --merge --delete-branch` (merge commit; **nunca use `--squash`** — preserva os commits semânticos individuais `feat:`/`fix:`/`docs:`; e nunca use `--admin` para forçar merge) e atualize a branch local (`git checkout <branch_destino> && git pull`).
