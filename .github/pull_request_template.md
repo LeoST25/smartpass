@@ -39,7 +39,7 @@
 - [ ] Critério 1:
 - [ ] Critério 2:
 - [ ] Critério 3:
-- [ ] Arquitetura: nova regra em `src/services/` com docstring tipada + `{"sucesso": True/False}` + `try/except` + `timeout` + fallback (antes de plugar em `src/app.py`)
+- [ ] Arquitetura: nova regra em `src/services/` com docstring tipada + `{"sucesso": True/False}` + `try/except` + `timeout` + fallback (antes de plugar em `frontend/src/` ou `src/api/routes.py`)
 - [ ] Observabilidade: `memoria_calculo`/`justificativa` gerada (tarifa, integração, CLT 6%, precisão geográfica) e exibida na UI + PDF
 
 ---
@@ -62,18 +62,18 @@ pytest -v -k "not integration"
 **Arquivos de teste adicionados/alterados:**
 <!-- ex.: tests/test_calculo_clt.py -->
 
-### 4.2 Playwright — Validação Visual (quando há mudança em `src/app.py` ou UI)
+### 4.2 Playwright — Validação Visual (quando há mudança na UI)
 
-<!-- Suba o Streamlit em background, abra via MCP Playwright, execute fluxo ponta a ponta, capture screenshot e verifique console. -->
+<!-- Suba o frontend React em background, abra via MCP Playwright, execute fluxo ponta a ponta, capture screenshot e verifique console. -->
 
 - [ ] Não se aplica (sem mudança visual) **ou**
-- [ ] Streamlit em background + Playwright MCP: fluxo ponta a ponta executado
+- [ ] Frontend React em background + Playwright MCP: fluxo ponta a ponta executado
 - [ ] Screenshot anexado (ou link do artefato)
 - [ ] Console sem erros (anexar log filtrado)
 
 **Comando de referência:**
 ```bash
-streamlit run src/app.py --server.headless true &
+cd frontend && npm run dev &
 # via MCP playwright: navigate → fill origem/destino → click Calcular → screenshot → check console
 ```
 
@@ -86,7 +86,7 @@ streamlit run src/app.py --server.headless true &
 - [ ] Zero persistência de dados de candidato em disco ou banco fora da sessão
 - [ ] PDFs e mapas gerados exclusivamente em `io.BytesIO` (nunca `open(..., "wb")` em disco) — `src/services/pdf_generator.py`, `src/services/map_generator.py`
 - [ ] Nenhum `open(..., "w")`, `Path.write`, `to_csv`/`to_excel`, `pickle.dump` fora de `/tmp` ou `BytesIO` em `src/services/` e `src/database/` (validado por `pr-guardian.yml:82` disk-guard)
-- [ ] Dados mantidos apenas em `st.session_state` / memória; sem `INSERT` de dados pessoais
+- [ ] Dados mantidos apenas em memória React / sessão; sem `INSERT` de dados pessoais
 
 ### Segurança — Zero segredos
 
@@ -97,7 +97,7 @@ streamlit run src/app.py --server.headless true &
 
 ### Qualidade
 
-- [ ] `python -m py_compile src/app.py && python -m compileall src/` sem erros
+- [ ] `python -m compileall src/` sem erros
 - [ ] `@st.cache_data` para geocodificação/rotas e `@st.cache_resource` para PostGIS quando aplicável
 - [ ] `flake8 --select=E9,F63,F7,F82` sem erros críticos (ou justificativa)
 

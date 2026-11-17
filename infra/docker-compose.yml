@@ -95,36 +95,6 @@ services:
       - smartpass
     restart: unless-stopped
 
-  # ---------------------------------------------------------------------------
-  # Streamlit UI (legado transitório, porta 8501)
-  # ---------------------------------------------------------------------------
-  app:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: production
-    image: smartpass:app
-    environment:
-      DB_HOST: db
-      DB_PORT: 5432
-      DB_NAME: ${DB_NAME:-smartpass}
-      DB_USER: ${DB_USER:-smartpass_user}
-      DB_PASS: ${DB_PASS:-changeme}
-      OTP_GRAPHQL_URL: http://otp:8080/otp/gtfs/v1
-      VT_TARIFA_PADRAO: ${VT_TARIFA_PADRAO:-5.00}
-      SPTRANS_API_TOKEN: ${SPTRANS_API_TOKEN:-}
-      STREAMLIT_ENV: production
-    ports:
-      - "8501:8501"
-    depends_on:
-      db:
-        condition: service_healthy
-      otp:
-        condition: service_healthy
-    networks:
-      - smartpass
-    restart: unless-stopped
-
 networks:
   smartpass:
     driver: bridge

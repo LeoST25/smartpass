@@ -39,7 +39,9 @@ export type Modalidade = 'Vale-Transporte' | 'Vale-Combustível' | 'Comparativo 
 export interface RouteCalculateRequest {
   origem: string;
   destino: string;
-  modalidade: Modalidade;
+  horario_entrada?: string;
+  horario_saida?: string;
+  modalidade?: Modalidade;
   dias_uteis?: number;
   escala?: string;
   uf_destino?: string;
@@ -49,6 +51,10 @@ export interface RouteCalculateRequest {
   salario_base?: number;
   tarifa_override?: number;
   valor_km?: number;
+  origem_lat?: number;
+  origem_lon?: number;
+  destino_lat?: number;
+  destino_lon?: number;
 }
 
 export interface DetalheTarifa {
@@ -68,6 +74,8 @@ export interface Leg {
   mode: string; // BUS | WALK | RAIL | SUBWAY | TRAM
   distance: number; // metros
   duration: number; // segundos
+  startTime?: number | string;
+  endTime?: number | string;
   from: { name: string; lat: number; lon: number };
   to: { name: string; lat: number; lon: number };
   route?: {
@@ -80,6 +88,8 @@ export interface Leg {
   codigo_linha?: string;
   agency?: { gtfsId?: string; name?: string };
   geometria_fallback?: boolean;
+  horario_inicio?: string;
+  horario_fim?: string;
   linha?: string;
 }
 
@@ -91,30 +101,42 @@ export interface LinhaOnibus {
   operadora?: string;
 }
 
-export interface ComparativoRota {
+// -----------------------------------------------------------------------------
+// Roteirizador Individual — Ida + Volta
+// -----------------------------------------------------------------------------
+
+export interface SentidoRota {
   legs: Leg[];
+  legs_transito: Leg[];
+  linhas: LinhaOnibus[];
   distancia_km: number;
-  duracao_min: number;
-  duracao_total_min?: number;
   caminhada_km: number;
   baldeacoes: number;
+  duracao_min: number;
   resumo_trajeto: string;
+  geometria_fallback: boolean;
+  horario_partida?: string | null;
+  horario_chegada?: string | null;
   custo_trecho: number;
-  custo_diario: number;
-  custo_mensal: number;
   detalhes: DetalheTarifa[];
-  detalhamento_tarifario?: string[];
-  memoria_calculo?: string[];
-  justificativa?: string;
-  alertas_tarifa?: string[];
+  detalhamento_tarifario: string[];
+  alertas_tarifa: string[];
+  fonte?: string | null;
 }
 
-export interface Comparativo {
-  rota_mais_rapida: ComparativoRota | null;
-  rota_mais_economica: ComparativoRota | null;
-  economia_mensal: number;
-  memoria_calculo?: string[];
-  justificativa?: string;
+export type TipoOpcao = 'mais_economica' | 'mais_rapida' | 'menor_caminhada';
+
+export interface OpcaoRota {
+  tipo: TipoOpcao;
+  categorias: string[];
+  ida: SentidoRota;
+  volta: SentidoRota;
+  custo_diario: number;
+  custo_mensal: number;
+  tempo_total_min: number;
+  baldeacoes_total: number;
+  caminhada_total_km: number;
+  resumo: string;
 }
 
 export interface ViabilidadeCLT {
@@ -131,44 +153,20 @@ export interface ViabilidadeCLT {
 
 export interface RouteCalculateResponse {
   sucesso: boolean;
-  principal: Record<string, unknown> | null;
-  vt: {
-    custo_diario: number;
-    custo_mensal: number;
-    custo_trecho?: number;
-    distancia_km: number;
-    duracao_min?: number;
-    caminhada_km?: number;
-    baldeacoes?: number;
-    resumo_trajeto?: string;
-    fonte?: string;
-    linhas?: LinhaOnibus[];
-    legs?: Leg[];
-    legs_transito?: Leg[];
-    detalhes?: DetalheTarifa[];
-    detalhamento_tarifario?: string[];
-    comparativo?: Comparativo;
-    fonte_comparativo?: string;
-    alertas_tarifa?: string[];
-    catalogo_versao?: string;
-    memoria_calculo?: string[];
-    justificativa?: string;
-    aviso?: string;
-  } | null;
-  vc: {
-    distancia_km: number;
-    custo_total: number;
-    custo_diario?: number;
-    custo_mensal?: number;
-    valor_km: number;
-    origem?: string;
-    destino?: string;
-  } | null;
-  comparativo: Comparativo | null;
+  opcoes: OpcaoRota[];
   viabilidade_clt: ViabilidadeCLT | null;
   coords: [number, number, number, number] | null; // lat_o, lon_o, lat_d, lon_d
   origem_label: string | null;
   destino_label: string | null;
+  dias_uteis: number | null;
+  horario_entrada: string | null;
+  horario_saida: string | null;
+  data_referencia: string | null;
+  // Legado (VC/Comparativo Completo)
+  principal: Record<string, unknown> | null;
+  vt: Record<string, unknown> | null;
+  vc: Record<string, unknown> | null;
+  comparativo: Record<string, unknown> | null;
   memoria_calculo: string[];
   justificativa: string | null;
   erro: string | null;
@@ -195,7 +193,7 @@ export interface HealthResponse {
 }
 
 // -----------------------------------------------------------------------------
-// Batch Simulate
+// Batch Simulate (legado — endpoint mantido na API, sem UI)
 // -----------------------------------------------------------------------------
 
 export interface BatchSimulateResponse {
@@ -238,4 +236,11 @@ export interface PDFReportRequest {
   tipo_beneficio: Modalidade;
   dados_calculo: Record<string, unknown>;
   coords?: [number, number, number, number];
+  dados_assinatura?: {
+    nome?: string;
+    cargo?: string;
+    cpf?: string;
+    [key: string]: unknown;
+  };
+  opcao_selecionada?: OpcaoRota;
 }

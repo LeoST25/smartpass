@@ -14,6 +14,7 @@ from src.services.geocoding import (
     _dentro_rmsp,
     _parse_termo,
     buscar_coordenadas_por_cep_ou_endereco,
+    geocodificar_reverso,
     sugerir_enderecos,
 )
 
@@ -32,6 +33,7 @@ def clear_cache():
         for nome in (
             "sugerir_enderecos",
             "buscar_coordenadas_por_cep_ou_endereco",
+            "geocodificar_reverso",
             "_consultar_viacep",
             "_consultar_brasilapi",
             "_consultar_photon",
@@ -562,3 +564,41 @@ def test_parse_termo_logradouro_com_numero():
     assert info["cep"] is None
     assert info["numero"] == "1000"
     assert "Avenida Paulista" in info["texto"]
+
+
+# -----------------------------------------------------------------------------
+# Geocodificação reversa (pino arrastado)
+# -----------------------------------------------------------------------------
+def test_geocodificar_reverso_sucesso():
+    payload = {
+        "lat": "-23.5614",
+        "lon": "-46.6559",
+        "display_name": "Avenida Paulista, 1000, São Paulo",
+        "address": {
+            "road": "Avenida Paulista",
+            "house_number": "1000",
+            "suburb": "Bela Vista",
+            "city": "São Paulo",
+            "state_code": "SP",
+            "postcode": "01310-100",
+        },
+    }
+    with patch("src.services.geocoding.requests.get", return_value=_mock_resp(payload)):
+        res = geocodificar_reverso(-23.5614, -46.6559)
+
+    assert res["sucesso"] is True
+    assert res["fonte"] == "nominatim_reverse"
+    assert res["nivel_precisao"] == "ALTA"
+    assert "Avenida Paulista" in res["endereco_encontrado"]
+
+
+def test_geocodificar_reverso_fora_rmsp():
+    res = geocodificar_reverso(-30.0, -50.0)
+    assert res["sucesso"] is False
+    assert "fora da área" in res["erro"]
+
+
+def test_geocodificar_reverso_offline():
+    with patch("src.services.geocoding.requests.get", side_effect=requests.RequestException("timeout")):
+        res = geocodificar_reverso(-23.5614, -46.6559)
+    assert res["sucesso"] is False

@@ -1,5 +1,5 @@
 /**
- * Mapa principal com polilinhas e marcadores da rota.
+ * Mapa principal com polilinhas e marcadores da rota (ida/volta alternável).
  */
 
 import { useEffect } from 'react';
@@ -10,22 +10,24 @@ import { collectPointsFromLegs } from '../../lib/geo';
 import { RoutePolylines } from './RoutePolylines';
 import { RouteMarkers } from './RouteMarkers';
 
-/**
- * Componente para ajustar o mapa aos bounds da rota.
- */
 function FitBounds() {
   const map = useMap();
   const { state } = useAppState();
 
   useEffect(() => {
-    if (!state.result?.coords) return;
+    const coords = state.result?.coords;
+    if (!coords) return;
 
-    const [latO, lonO, latD, lonD] = state.result.coords;
-    const pontos: [number, number][] = [[latO, lonO], [latD, lonD]];
+    const [latO, lonO, latD, lonD] = coords;
+    const pontos: [number, number][] = [
+      [state.origem?.lat ?? latO, state.origem?.lon ?? lonO],
+      [state.destino?.lat ?? latD, state.destino?.lon ?? lonD],
+    ];
 
-    // Adiciona pontos das legs se disponíveis
-    if (state.result.vt?.legs) {
-      pontos.push(...collectPointsFromLegs(state.result.vt.legs));
+    const opcao = state.result?.opcoes?.[state.selectedOptionIndex ?? 0];
+    const sentido = state.mapDirection === 'ida' ? opcao?.ida : opcao?.volta;
+    if (sentido?.legs) {
+      pontos.push(...collectPointsFromLegs(sentido.legs));
     }
 
     if (pontos.length > 0) {
@@ -37,7 +39,7 @@ function FitBounds() {
       ];
       map.fitBounds(bounds, { padding: [50, 50] });
     }
-  }, [map, state.result]);
+  }, [map, state.result, state.origem, state.destino, state.selectedOptionIndex, state.mapDirection]);
 
   return null;
 }
@@ -45,7 +47,6 @@ function FitBounds() {
 export function RouteMap() {
   const { state } = useAppState();
 
-  // Centro padrão: São Paulo
   const center: [number, number] = state.result?.coords
     ? [state.result.coords[0], state.result.coords[1]]
     : [-23.5505, -46.6333];
@@ -53,12 +54,7 @@ export function RouteMap() {
   const zoom = state.result ? 13 : 11;
 
   return (
-    <MapContainer
-      center={center}
-      zoom={zoom}
-      className="w-full h-full"
-      zoomControl={true}
-    >
+    <MapContainer center={center} zoom={zoom} className="w-full h-full" zoomControl={true}>
       <TileLayer
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"

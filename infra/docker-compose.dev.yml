@@ -60,30 +60,6 @@ services:
     networks:
       - smartpass
 
-  # Streamlit UI (legado)
-  app:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: development
-    image: smartpass:app-dev
-    environment:
-      DB_HOST: db
-      DB_PORT: 5432
-      DB_NAME: ${DB_NAME:-smartpass}
-      DB_USER: ${DB_USER:-smartpass_user}
-      DB_PASS: ${DB_PASS:-changeme}
-      OTP_GRAPHQL_URL: http://otp:8080/otp/gtfs/v1
-      STREAMLIT_ENV: development
-      DEBUG: "1"
-    volumes:
-      - ../src:/app/src
-    ports:
-      - "8501:8501"
-    restart: "no"
-    networks:
-      - smartpass
-
 networks:
   smartpass:
     name: smartpass_dev

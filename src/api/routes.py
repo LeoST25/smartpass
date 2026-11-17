@@ -34,14 +34,20 @@ from src.api.schemas import (
 from src.services.benefit_calculator import analisar_viabilidade_clt
 from src.services.calendar_engine import calcular_dias_uteis
 from src.services.export_formatter import gerar_export_compra, gerar_export_rubrica
-from src.services.geocoding import buscar_coordenadas_por_cep_ou_endereco, sugerir_enderecos
-from src.services.pdf_generator import gerar_pdf_evidencia
+from src.services.fare_engine import ranquear_opcoes_ida_volta
+from src.services.geocoding import (
+    buscar_coordenadas_por_cep_ou_endereco,
+    geocodificar_reverso,
+    sugerir_enderecos,
+)
+from src.services.pdf_generator import gerar_pdf_comprovante, gerar_pdf_evidencia
 from src.services.routing import (
     calcular_vale_combustivel,
     calcular_vale_transporte,
     roteirizar_com_comparativo,
     roteirizar_vale_transporte_automatico,
 )
+from src.services.transit_api import consultar_itinerarios_ida_volta_oficial
 
 logger = logging.getLogger(__name__)
 
@@ -134,37 +140,71 @@ def geocoding_autocomplete(
 # -----------------------------------------------------------------------------
 @router.post("/routes/calculate", response_model=RouteCalculateResponse)
 def routes_calculate(req: RouteCalculateRequest):
-    """Cálculo completo de rotas (VT/VC/Comparativo) com integração temporal e CLT 6%.
+    """Cálculo de rotas com motor ida+volta por horário real (VT) + CLT 6%.
+
+    Para ``modalidade="Vale-Transporte"`` (default) executa duas consultas OTP:
+    ida (chegar até ``horario_entrada``) e volta (sair a partir de ``horario_saida``),
+    aplica o ``fare_engine`` separadamente por sentido e retorna até 3 opções
+    ranqueadas (mais econômica, mais rápida, menor caminhada).
+
+    Modalidades ``Vale-Combustível``/``Comparativo Completo`` mantêm o contrato
+    legado (``vt``/``vc``/``comparativo``) para consumidores existentes da API.
 
     Args:
-        req: RouteCalculateRequest com origem, destino, modalidade, parâmetros opcionais.
+        req: RouteCalculateRequest com origem, destino, horários e parâmetros opcionais.
 
     Returns:
-        RouteCalculateResponse: Resultado consolidado com memória auditável.
+        RouteCalculateResponse: Opções ranqueadas (ou legado VC) com memória auditável.
     """
     try:
-        # 1. Geocodificação
-        res_geo_origem = buscar_coordenadas_por_cep_ou_endereco(req.origem.strip())
-        res_geo_destino = buscar_coordenadas_por_cep_ou_endereco(req.destino.strip())
+        # 1. Geocodificação (ou coordenadas explícitas do pino arrastado)
+        tem_coords = all(
+            v is not None
+            for v in (req.origem_lat, req.origem_lon, req.destino_lat, req.destino_lon)
+        )
+        if tem_coords:
+            lat_o, lon_o = float(req.origem_lat), float(req.origem_lon)
+            lat_d, lon_d = float(req.destino_lat), float(req.destino_lon)
+            endereco_origem = req.origem.strip()
+            endereco_destino = req.destino.strip()
 
-        if not res_geo_origem.get("sucesso"):
-            return RouteCalculateResponse(
-                sucesso=False,
-                erro="Não foi possível localizar o endereço de origem. Revise o CEP ou o endereço informado.",
-                memoria_calculo=["Geocodificação de origem falhou."],
-            )
-        if not res_geo_destino.get("sucesso"):
-            return RouteCalculateResponse(
-                sucesso=False,
-                erro="Não foi possível localizar o endereço de destino. Revise o CEP ou o endereço informado.",
-                memoria_calculo=["Geocodificação de destino falhou."],
-            )
+            rev_o = geocodificar_reverso(lat_o, lon_o)
+            rev_d = geocodificar_reverso(lat_d, lon_d)
+            if rev_o.get("sucesso"):
+                endereco_origem = rev_o["endereco_encontrado"]
+            if rev_d.get("sucesso"):
+                endereco_destino = rev_d["endereco_encontrado"]
+            geo_o = rev_o if rev_o.get("sucesso") else {
+                "sucesso": True, "nivel_precisao": "MEDIA", "semaforo": "🟡 Aproximado",
+                "fonte": "coordenada_arrastada", "motivo_precisao": "Coordenada arrastada no mapa (sem reverse geocoding).",
+            }
+            geo_d = rev_d if rev_d.get("sucesso") else {
+                "sucesso": True, "nivel_precisao": "MEDIA", "semaforo": "🟡 Aproximado",
+                "fonte": "coordenada_arrastada", "motivo_precisao": "Coordenada arrastada no mapa (sem reverse geocoding).",
+            }
+        else:
+            res_geo_origem = buscar_coordenadas_por_cep_ou_endereco(req.origem.strip())
+            res_geo_destino = buscar_coordenadas_por_cep_ou_endereco(req.destino.strip())
 
-        lat_o, lon_o = res_geo_origem["lat"], res_geo_origem["lon"]
-        lat_d, lon_d = res_geo_destino["lat"], res_geo_destino["lon"]
+            if not res_geo_origem.get("sucesso"):
+                return RouteCalculateResponse(
+                    sucesso=False,
+                    erro="Não foi possível localizar o endereço de origem. Revise o CEP ou o endereço informado.",
+                    memoria_calculo=["Geocodificação de origem falhou."],
+                )
+            if not res_geo_destino.get("sucesso"):
+                return RouteCalculateResponse(
+                    sucesso=False,
+                    erro="Não foi possível localizar o endereço de destino. Revise o CEP ou o endereço informado.",
+                    memoria_calculo=["Geocodificação de destino falhou."],
+                )
+            lat_o, lon_o = res_geo_origem["lat"], res_geo_origem["lon"]
+            lat_d, lon_d = res_geo_destino["lat"], res_geo_destino["lon"]
+            endereco_origem = res_geo_origem.get("endereco_encontrado", req.origem)
+            endereco_destino = res_geo_destino.get("endereco_encontrado", req.destino)
+            geo_o, geo_d = res_geo_origem, res_geo_destino
+
         coords = (lat_o, lon_o, lat_d, lon_d)
-        endereco_origem = res_geo_origem.get("endereco_encontrado", req.origem)
-        endereco_destino = res_geo_destino.get("endereco_encontrado", req.destino)
 
         # 2. Calendário (dias úteis)
         now = datetime.now()
@@ -183,14 +223,90 @@ def routes_calculate(req: RouteCalculateRequest):
             dias_efetivos = req.dias_uteis or 22
             memoria_cal = [f"Fallback: usando {dias_efetivos} dias úteis informados manualmente."]
 
-        # 3. Roteirização conforme modalidade
+        memoria_final: list[str] = list(memoria_cal)
+
+        # 3. Roteirização
+        if req.modalidade == "Vale-Transporte":
+            # --- Motor ida+volta por horário real ---
+            resp_rotas = consultar_itinerarios_ida_volta_oficial(
+                lat_o, lon_o, lat_d, lon_d,
+                req.horario_entrada, req.horario_saida,
+                endereco_origem=endereco_origem,
+                endereco_destino=endereco_destino,
+                uf=uf, municipio=mun,
+            )
+
+            config_override = None
+            if req.tarifa_override and req.tarifa_override > 0:
+                ov = float(req.tarifa_override)
+                config_override = {
+                    "tarifa_padrao": ov,
+                    "tarifa_onibus_sptrans": ov,
+                    "tarifa_trilho": ov,
+                    "tarifa_emtu": ov,
+                    "tarifa_integracao_onibus_trilho": round(ov * 2, 2),
+                }
+                memoria_final.append(f"Override RH: tarifa unitária R$ {ov:.2f} aplicada a todos os trechos (convênio).")
+
+            ranqueamento = ranquear_opcoes_ida_volta(
+                resp_rotas.get("ida", []),
+                resp_rotas.get("volta", []),
+                dias_uteis=dias_efetivos,
+                config=config_override,
+            )
+            opcoes = ranqueamento.get("opcoes", [])
+            memoria_final.extend(ranqueamento.get("memoria_calculo", []))
+
+            if not resp_rotas.get("sucesso"):
+                memoria_final.append(f"Aviso: {resp_rotas.get('erro')}")
+
+            # CLT sobre a opção mais econômica (opcoes[0])
+            viabilidade_clt = None
+            if req.salario_base and req.salario_base > 0 and opcoes:
+                try:
+                    viabilidade_clt = analisar_viabilidade_clt(
+                        float(opcoes[0].get("custo_mensal", 0) or 0), float(req.salario_base)
+                    )
+                except Exception:
+                    viabilidade_clt = None
+            if viabilidade_clt and viabilidade_clt.get("memoria_calculo"):
+                memoria_final.extend(viabilidade_clt["memoria_calculo"])
+
+            memoria_final.append(
+                f"Precisão geográfica (origem): {geo_o.get('nivel_precisao', '—')} — fonte {geo_o.get('fonte', '—')}"
+            )
+            memoria_final.append(
+                f"Precisão geográfica (destino): {geo_d.get('nivel_precisao', '—')} — fonte {geo_d.get('fonte', '—')}"
+            )
+
+            justificativa = (
+                f"Roteirizador individual VT ida ({req.horario_entrada}) + volta ({req.horario_saida}) "
+                f"em {dias_efetivos} dias úteis ({escala} {mes:02d}/{ano} {uf}/{mun}), "
+                f"data útil {resp_rotas.get('data_referencia')}, fonte {resp_rotas.get('fonte')}."
+            )
+
+            return RouteCalculateResponse(
+                sucesso=True,
+                opcoes=opcoes,
+                viabilidade_clt=viabilidade_clt,
+                coords=coords,
+                origem_label=endereco_origem,
+                destino_label=endereco_destino,
+                dias_uteis=dias_efetivos,
+                horario_entrada=req.horario_entrada,
+                horario_saida=req.horario_saida,
+                data_referencia=resp_rotas.get("data_referencia"),
+                memoria_calculo=memoria_final,
+                justificativa=justificativa,
+            )
+
+        # --- Legado: Vale-Combustível / Comparativo Completo (contrato preservado) ---
         resultado_vt = None
         resultado_vc = None
         comparativo = None
 
         if req.modalidade in ("Vale-Transporte", "Comparativo Completo"):
             vt_raw = roteirizar_vale_transporte_automatico(lat_o, lon_o, lat_d, lon_d, endereco_origem, endereco_destino)
-            # Override de tarifa
             tarifa = req.tarifa_override if req.tarifa_override and req.tarifa_override > 0 else None
             if tarifa and vt_raw.get("sucesso"):
                 resultado_vt = _recalcular_vt_com_parametros(vt_raw, tarifa, dias_efetivos)
@@ -200,12 +316,11 @@ def routes_calculate(req: RouteCalculateRequest):
                     resultado_vt["custo_mensal"] = round(resultado_vt.get("custo_diario", 0) * dias_efetivos, 2)
                     resultado_vt["dias_uteis"] = dias_efetivos
 
-            # Comparativo rápida vs econômica
             try:
                 comp_raw = roteirizar_com_comparativo(lat_o, lon_o, lat_d, lon_d, dias_uteis=dias_efetivos)
                 if comp_raw.get("sucesso") and comp_raw.get("comparativo"):
                     comparativo = comp_raw["comparativo"]
-                    if comparativo.get("rota_mais_rapida"):
+                    if comparativo.get("rota_mais_rapida") and resultado_vt:
                         resultado_vt["comparativo"] = comparativo
                         resultado_vt["fonte_comparativo"] = comp_raw.get("fonte")
             except Exception:
@@ -228,7 +343,6 @@ def routes_calculate(req: RouteCalculateRequest):
             else:
                 resultado_vc = vc_raw
 
-        # 4. Resultado principal
         if req.modalidade == "Vale-Transporte":
             principal = resultado_vt
         elif req.modalidade == "Vale-Combustível":
@@ -236,7 +350,6 @@ def routes_calculate(req: RouteCalculateRequest):
         else:
             principal = resultado_vt or resultado_vc
 
-        # 5. Análise CLT 6% (quando salario_base informado)
         viabilidade_clt = None
         if req.salario_base and req.salario_base > 0 and principal:
             custo_mensal = principal.get("custo_mensal") or 0
@@ -244,7 +357,7 @@ def routes_calculate(req: RouteCalculateRequest):
                 viabilidade_clt = analisar_viabilidade_clt(float(custo_mensal), float(req.salario_base))
             except Exception:
                 viabilidade_clt = None
-        memoria_final = list(memoria_cal)
+
         if resultado_vt and resultado_vt.get("memoria_calculo"):
             memoria_final.extend(resultado_vt["memoria_calculo"])
         if resultado_vc and resultado_vc.get("memoria_calculo"):
@@ -252,12 +365,11 @@ def routes_calculate(req: RouteCalculateRequest):
         if viabilidade_clt and viabilidade_clt.get("memoria_calculo"):
             memoria_final.extend(viabilidade_clt["memoria_calculo"])
 
-        # 7. Geocodificação na memória (auditoria)
         memoria_final.append(
-            f"Precisão geográfica (origem): {res_geo_origem.get('nivel_precisao', '—')} — fonte {res_geo_origem.get('fonte', '—')}"
+            f"Precisão geográfica (origem): {geo_o.get('nivel_precisao', '—')} — fonte {geo_o.get('fonte', '—')}"
         )
         memoria_final.append(
-            f"Precisão geográfica (destino): {res_geo_destino.get('nivel_precisao', '—')} — fonte {res_geo_destino.get('fonte', '—')}"
+            f"Precisão geográfica (destino): {geo_d.get('nivel_precisao', '—')} — fonte {geo_d.get('fonte', '—')}"
         )
 
         justificativa = f"Cálculo {req.modalidade} com {dias_efetivos} dias úteis ({escala} {mes:02d}/{ano} {uf}/{mun})."
@@ -272,6 +384,7 @@ def routes_calculate(req: RouteCalculateRequest):
             coords=coords,
             origem_label=endereco_origem,
             destino_label=endereco_destino,
+            dias_uteis=dias_efetivos,
             memoria_calculo=memoria_final,
             justificativa=justificativa,
         )
@@ -296,21 +409,34 @@ def _recalcular_vt_com_parametros(resultado_vt: dict, tarifa: float | None, dias
 # -----------------------------------------------------------------------------
 @router.post("/reports/pdf")
 def reports_pdf(req: PDFReportRequest):
-    """Gera PDF de evidência em memória (StreamingResponse application/pdf).
+    """Gera PDF de evidência/comprovante em memória (StreamingResponse application/pdf).
+
+    Para Vale-Transporte individual com ``opcao_selecionada``, gera o comprovante
+    com timeline Ida/Volta e bloco de assinatura; caso contrário, mantém o legado.
 
     Args:
-        req: PDFReportRequest com dados_candidato, tipo_beneficio, dados_calculo, coords.
+        req: PDFReportRequest com dados_candidato, tipo_beneficio, dados_calculo,
+            coords e (opcional) opcao_selecionada/dados_assinatura.
 
     Returns:
         StreamingResponse: PDF em BytesIO com Content-Disposition attachment.
     """
     try:
-        pdf_buffer = gerar_pdf_evidencia(
-            req.dados_candidato,
-            req.tipo_beneficio,
-            req.dados_calculo,
-            coords=req.coords,
-        )
+        if req.opcao_selecionada:
+            pdf_buffer = gerar_pdf_comprovante(
+                req.dados_candidato,
+                req.dados_calculo,
+                coords=req.coords,
+                opcao_selecionada=req.opcao_selecionada,
+                dados_assinatura=req.dados_assinatura,
+            )
+        else:
+            pdf_buffer = gerar_pdf_evidencia(
+                req.dados_candidato,
+                req.tipo_beneficio,
+                req.dados_calculo,
+                coords=req.coords,
+            )
         # Normaliza para BytesIO
         if isinstance(pdf_buffer, io.BytesIO):
             pdf_buffer.seek(0)
@@ -319,7 +445,7 @@ def reports_pdf(req: PDFReportRequest):
             pdf_buffer.seek(0)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        filename = f"Evidencia_SmartPass_{req.tipo_beneficio.replace(' ', '_')}_{timestamp}.pdf"
+        filename = f"Comprovante_SmartPass_{req.tipo_beneficio.replace(' ', '_')}_{timestamp}.pdf"
 
         return StreamingResponse(
             pdf_buffer,

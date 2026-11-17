@@ -1,14 +1,11 @@
 /**
- * Marcadores de origem, destino e baldeações.
+ * Marcadores de origem, destino e baldeações — origem/destino arrastáveis.
  */
 
 import { Marker, Tooltip } from 'react-leaflet';
 import L from 'leaflet';
 import { useAppState } from '../../state/AppContext';
 
-/**
- * Ícone customizado para marcadores.
- */
 function createIcon(color: string, label: string): L.DivIcon {
   return L.divIcon({
     className: 'custom-marker',
@@ -61,47 +58,73 @@ function createTransferIcon(): L.DivIcon {
 }
 
 export function RouteMarkers() {
-  const { state } = useAppState();
+  const { state, dispatch } = useAppState();
 
-  if (!state.result?.coords) return null;
+  const coords = state.result?.coords;
+  const origemPos: [number, number] = [
+    state.origem?.lat ?? coords?.[0] ?? -23.5505,
+    state.origem?.lon ?? coords?.[1] ?? -46.6333,
+  ];
+  const destinoPos: [number, number] = [
+    state.destino?.lat ?? coords?.[2] ?? -23.5505,
+    state.destino?.lon ?? coords?.[3] ?? -46.6333,
+  ];
 
-  const [latO, lonO, latD, lonD] = state.result.coords;
-  const legs = state.result.vt?.legs_transito || [];
+  const opcao = state.result?.opcoes?.[state.selectedOptionIndex ?? 0];
+  const sentido = state.mapDirection === 'ida' ? opcao?.ida : opcao?.volta;
+  const legs = sentido?.legs_transito || [];
 
-  // Marcadores de baldeação (entre legs de trânsito)
   const transfers = legs.slice(0, -1).map((leg, idx) => ({
     position: [leg.to.lat, leg.to.lon] as [number, number],
     linha: leg.route?.shortName || leg.linha || 'Linha',
     key: `transfer-${idx}`,
   }));
 
+  function onMove(which: 'origem' | 'destino', latlng: L.LatLng) {
+    dispatch({
+      type: 'MOVE_MARKER',
+      payload: { which, lat: latlng.lat, lon: latlng.lng },
+    });
+  }
+
   return (
     <>
-      {/* Origem */}
-      <Marker position={[latO, lonO]} icon={createIcon('#16a34a', 'A')}>
+      <Marker
+        position={origemPos}
+        icon={createIcon('#16a34a', 'A')}
+        draggable
+        eventHandlers={{
+          dragend: (e) => onMove('origem', e.target.getLatLng()),
+        }}
+      >
         <Tooltip sticky>
           <div className="text-xs">
             <div className="font-semibold">Origem</div>
-            {state.result.origem_label && (
-              <div className="text-slate-600">{state.result.origem_label}</div>
+            {state.origem?.label_exibicao && (
+              <div className="text-slate-600">{state.origem.label_exibicao}</div>
             )}
           </div>
         </Tooltip>
       </Marker>
 
-      {/* Destino */}
-      <Marker position={[latD, lonD]} icon={createIcon('#dc2626', 'B')}>
+      <Marker
+        position={destinoPos}
+        icon={createIcon('#dc2626', 'B')}
+        draggable
+        eventHandlers={{
+          dragend: (e) => onMove('destino', e.target.getLatLng()),
+        }}
+      >
         <Tooltip sticky>
           <div className="text-xs">
             <div className="font-semibold">Destino</div>
-            {state.result.destino_label && (
-              <div className="text-slate-600">{state.result.destino_label}</div>
+            {state.destino?.label_exibicao && (
+              <div className="text-slate-600">{state.destino.label_exibicao}</div>
             )}
           </div>
         </Tooltip>
       </Marker>
 
-      {/* Baldeações */}
       {transfers.map((transfer) => (
         <Marker key={transfer.key} position={transfer.position} icon={createTransferIcon()}>
           <Tooltip sticky>

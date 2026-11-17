@@ -5,11 +5,14 @@ import requests
 
 from src.services.transit_api import (
     _consulta_otp,
+    _data_util_referencia,
     _enriquecer_leg,
     _extrair_itinerario_otp,
+    _montar_consulta_otp,
     consultar_linhas_transporte_oficial,
     decodificar_polyline,
     estimar_itinerario_fallback,
+    resolver_itinerarios_ida_volta,
 )
 
 
@@ -168,3 +171,47 @@ def test_estimar_itinerario_fallback():
     assert res["distancia_km"] == pytest.approx(12.3)
     assert len(res["linhas"]) == 1
     assert res["resumo_trajeto"]
+
+
+# -----------------------------------------------------------------------------
+# Motor Ida + Volta por horário real
+# -----------------------------------------------------------------------------
+def test_montar_consulta_otp_ida_usa_latest_arrival():
+    query = _montar_consulta_otp(-23.5, -46.8, -23.55, -46.63, data_hora="2026-11-17T08:00:00-03:00", arrive_by=True)
+    assert "latestArrival" in query
+    assert "earliestDeparture" not in query
+
+
+def test_montar_consulta_otp_volta_usa_earliest_departure():
+    query = _montar_consulta_otp(-23.5, -46.8, -23.55, -46.63, data_hora="2026-11-17T18:00:00-03:00", arrive_by=False)
+    assert "earliestDeparture" in query
+    assert "latestArrival" not in query
+
+
+def test_montar_consulta_otp_solicita_start_end_time():
+    query = _montar_consulta_otp(-23.5, -46.8, -23.55, -46.63)
+    assert "startTime" in query
+    assert "endTime" in query
+
+
+def test_data_util_referencia_ignora_fim_de_semana():
+    # 2026-11-14 é sábado; deve pular para segunda 2026-11-16
+    from datetime import date
+    d = _data_util_referencia(uf="SP", municipio="São Paulo", data_base=date(2026, 11, 14))
+    assert d == "2026-11-16"
+
+
+def test_resolver_itinerarios_ida_volta_duas_consultas(otp_payload_completo):
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = otp_payload_completo
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("src.services.transit_api.requests.post", return_value=mock_resp) as mock_post:
+        res = resolver_itinerarios_ida_volta(
+            -23.5, -46.8, -23.55, -46.63, "08:00", "18:00", "2026-11-17"
+        )
+
+    assert mock_post.call_count == 2
+    assert "ida" in res and "volta" in res
+    assert len(res["ida"]) >= 1
+    assert len(res["volta"]) >= 1
